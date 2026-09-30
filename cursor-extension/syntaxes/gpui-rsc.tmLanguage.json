@@ -1,0 +1,166 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "source.gpui-rsc",
+  "patterns": [
+    { "include": "#script" },
+    { "include": "#html-comment" },
+    { "include": "#doctype" },
+    { "include": "#html-tag" },
+    { "include": "#html-entity" }
+  ],
+  "repository": {
+    "script": {
+      "name": "meta.embedded.block.rust",
+      "contentName": "source.rust",
+      "begin": "^\\s*(<)(script)(\\s*)(>)\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.html" },
+        "2": { "name": "entity.name.tag.html" },
+        "4": { "name": "punctuation.definition.tag.end.html" }
+      },
+      "end": "^\\s*(</)(script)(\\s*)(>)\\s*$",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.html" },
+        "2": { "name": "entity.name.tag.html" },
+        "4": { "name": "punctuation.definition.tag.end.html" }
+      },
+      "patterns": [
+        { "include": "#rust" }
+      ]
+    },
+    "rust": {
+      "patterns": [
+        { "include": "#rust-line-comment" },
+        { "include": "#rust-block-comment" },
+        { "include": "#rust-string" },
+        { "include": "#rust-char" },
+        { "include": "#rust-function-definition" },
+        { "include": "#rust-macro" },
+        { "include": "#rust-number" },
+        { "include": "#rust-keyword" },
+        { "include": "#rust-type" },
+        { "include": "#rust-function-call" },
+        { "include": "#rust-operator" }
+      ]
+    },
+    "rust-line-comment": {
+      "name": "comment.line.double-slash.rust",
+      "match": "//.*$"
+    },
+    "rust-block-comment": {
+      "name": "comment.block.rust",
+      "begin": "/\\*",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.begin.rust" }
+      },
+      "end": "\\*/",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.comment.end.rust" }
+      }
+    },
+    "rust-string": {
+      "name": "string.quoted.double.rust",
+      "begin": "b?\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.rust" }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.rust" }
+      },
+      "patterns": [
+        { "name": "constant.character.escape.rust", "match": "\\\\(?:[nrt0\\\\\"']|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f_]+\\})" }
+      ]
+    },
+    "rust-char": {
+      "name": "string.quoted.single.rust",
+      "match": "'(?:[^'\\\\]|\\\\.)'"
+    },
+    "rust-function-definition": {
+      "match": "\\b(fn)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.function.rust" },
+        "3": { "name": "entity.name.function.rust" }
+      }
+    },
+    "rust-macro": {
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=!)",
+      "name": "entity.name.function.macro.rust"
+    },
+    "rust-number": {
+      "match": "\\b(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(?:\\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)(?:u(?:8|16|32|64|128|size)|i(?:8|16|32|64|128|size)|f(?:32|64))?\\b",
+      "name": "constant.numeric.rust"
+    },
+    "rust-keyword": {
+      "match": "\\b(?:as|async|await|break|const|continue|crate|dyn|else|enum|extern|false|for|if|impl|in|let|loop|match|mod|move|mut|pub|ref|return|static|struct|trait|true|type|unsafe|use|where|while|self|Self|super)\\b",
+      "name": "keyword.control.rust"
+    },
+    "rust-type": {
+      "match": "\\b(?:bool|char|f32|f64|i8|i16|i32|i64|i128|isize|str|u8|u16|u32|u64|u128|usize|[A-Z][A-Za-z0-9_]*)\\b",
+      "name": "storage.type.rust"
+    },
+    "rust-function-call": {
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()",
+      "name": "entity.name.function.rust"
+    },
+    "rust-operator": {
+      "match": "(?:=>|->|::|[=+*/%&|^!<>~-]+|[;,.(){}\\[\\]])",
+      "name": "keyword.operator.rust"
+    },
+    "html-comment": {
+      "name": "comment.block.html",
+      "begin": "<!--",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.html" }
+      },
+      "end": "-->",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.comment.html" }
+      }
+    },
+    "doctype": {
+      "match": "<!DOCTYPE\\b[^>]*>",
+      "name": "meta.tag.sgml.doctype.html"
+    },
+    "html-tag": {
+      "begin": "(<)(/?)([A-Za-z][A-Za-z0-9:-]*)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.html" },
+        "2": { "name": "punctuation.definition.tag.html" },
+        "3": { "name": "entity.name.tag.html" }
+      },
+      "end": "(/?>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.html" }
+      },
+      "name": "meta.tag.html",
+      "patterns": [
+        { "include": "#html-attribute" },
+        { "include": "#html-string" },
+        { "include": "#html-entity" }
+      ]
+    },
+    "html-attribute": {
+      "match": "([A-Za-z_:][A-Za-z0-9_.:-]*)(\\s*)(=)",
+      "captures": {
+        "1": { "name": "entity.other.attribute-name.html" },
+        "3": { "name": "keyword.operator.assignment.html" }
+      }
+    },
+    "html-string": {
+      "name": "string.quoted.double.html",
+      "begin": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.html" }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.html" }
+      }
+    },
+    "html-entity": {
+      "match": "&(?:[A-Za-z][A-Za-z0-9]+|#[0-9]+|#x[0-9A-Fa-f]+);",
+      "name": "constant.character.entity.html"
+    }
+  }
+}

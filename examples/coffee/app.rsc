@@ -3,7 +3,7 @@ use gpui_rsc::{in_binding, in_out_binding, out_binding};
 use gpui_rsc::runtime::{Value, Snapshot};
 use std::collections::HashMap;
 
-use gpui_rsc::{component, runtime::Definition};
+use gpui_rsc::{component, runtime::{Definition, InlineStyle as Style, Length, StyleContext, StyleRule}};
 use crate::generated::{coffee_profile, coffee_variables_form};
 
 pub fn definition() -> Definition {
@@ -51,6 +51,21 @@ pub fn definition() -> Definition {
         calculate: calculate,
         on_change: adjust_recipe_to_target,
     }
+    .with_style_sheet(dynamic_styles)
+}
+
+pub fn dynamic_styles(context: &StyleContext<'_>) -> Vec<StyleRule> {
+    if context.viewport_width > 768.0 {
+        return Vec::new();
+    }
+    let card_width = (context.viewport_width - 28.0).max(0.0).min(560.0);
+    vec![StyleRule::new(
+        ".mobile-card",
+        Style::new()
+            .width(Length::Percent(1.0))
+            .min_width(0.0)
+            .max_width(card_width),
+    )]
 }
 
 fn number(recipe: &HashMap<String, Value>, key: &str, fallback: f32) -> f32 {
@@ -258,9 +273,20 @@ pub fn adjust_recipe_to_target(recipe: &mut HashMap<String, Value>, changed_key:
 </script>
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Coffee / Lab</title></head>
+<head>
+  <meta charset="utf-8">
+  <title>Coffee / Lab</title>
+  <style>
+    @media (max-width: 768px) {
+      main { padding:18px 14px; gap:18px; }
+      header { flex-direction:column; align-items:center; gap:12px; }
+      .cards { flex-direction:column; flex-wrap:nowrap; align-items:center; gap:16px; width:100%; min-width:0; }
+      .mobile-card { width:100%; max-width:560px; min-width:0; }
+    }
+  </style>
+</head>
 <body style="background:#17130f; color:#f4ece1; overflow-y:auto">
-  <main style="max-width:1200px; margin:auto; padding:28px; display:flex; flex-direction:column; gap:24px">
+  <main style="width:100%; max-width:1200px; margin:auto; padding:28px; display:flex; flex-direction:column; gap:24px">
     <header style="display:flex; justify-content:space-between; align-items:center; gap:20px">
       <div style="display:flex; flex-direction:column; gap:5px">
         <p style="font-size:10px; font-weight:600; color:#d99b59">BREW RECIPE STUDIO</p>
@@ -270,9 +296,10 @@ pub fn adjust_recipe_to_target(recipe: &mut HashMap<String, Value>, changed_key:
       <div style="background:#2b2118; border:1px solid #4b3928; border-radius:99px; padding:8px 12px; color:#e0ad71; font-size:10px; font-weight:600">●  RECIPE ESTIMATE</div>
     </header>
 
-    <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap">
-      <component name="coffee-variables-form" method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
-      <component name="coffee-profile" acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
+    <div class="cards" style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap">
+      <component class="mobile-card controls-form" name="coffee-variables-form" method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
+      <component class="mobile-card profile-form" name="coffee-profile" acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
+      <brew-visualization class="mobile-card brew-preview" style="flex:1; min-width:260px"></brew-visualization>
     </div>
   </main>
 </body>
