@@ -1,5 +1,5 @@
 //! Binds a compiler-generated element tree to application state and GPUI Kit.
-use crate::runtime::{Binding, Definition, Direction, Snapshot, Value};
+use crate::runtime::{Binding, Definition, Direction, Snapshot, StyleSheet, Value};
 
 use crate::{TemplateElement, TemplateNode};
 use std::collections::{HashMap, HashSet};
@@ -78,6 +78,8 @@ pub struct Page {
     pub root: Element,
     pub controls: Vec<Control>,
     pub defaults: HashMap<String, Value>,
+    pub mobile_breakpoint: Option<f32>,
+    pub style_sheets: Vec<StyleSheet>,
 }
 
 pub fn compile(def: &Definition) -> Result<Page, String> {
@@ -98,10 +100,22 @@ pub fn compile(def: &Definition) -> Result<Page, String> {
                 .map(|k| (k.to_owned(), c.default_value()))
         })
         .collect::<HashMap<_, _>>();
+    fn collect_style_sheets(definition: &Definition, into: &mut Vec<StyleSheet>) {
+        if let Some(style_sheet) = definition.style_sheet {
+            into.push(style_sheet);
+        }
+        for import in &definition.imports {
+            collect_style_sheets(import, into);
+        }
+    }
+    let mut style_sheets = Vec::new();
+    collect_style_sheets(def, &mut style_sheets);
     Ok(Page {
         root,
         controls,
         defaults,
+        mobile_breakpoint: def.mobile_breakpoint,
+        style_sheets,
     })
 }
 fn assign_output_ids(element: &mut Element, next: &mut usize) {
@@ -308,7 +322,15 @@ fn compile_element(
             );
         }
         for key in attrs.keys() {
-            if key != "name" && key != "style" && !child_scope.contains_key(key) {
+            if key != "name"
+                && key != "style"
+                && key != "mobile-style"
+                && key != "class"
+                && key != "id"
+                && key != "data-rsc-inline-style"
+                && !key.starts_with("data-rsc-responsive-")
+                && !child_scope.contains_key(key)
+            {
                 return Err(format!("unknown parameter {key} on {name}"));
             }
         }
@@ -316,7 +338,12 @@ fn compile_element(
         let child_root = compile_component(child, &child_scope, &instance, controls, seen)?;
         return Ok(Element {
             tag: "div".into(),
-            style: InlineStyle::parse(attr("style").unwrap_or("")),
+            style: InlineStyle::parse_with_mobile(
+                attr("style").unwrap_or(""),
+                attr("mobile-style").unwrap_or(""),
+                responsive_styles(&attrs),
+                attr("data-rsc-inline-style").unwrap_or(""),
+            ),
             attrs,
             children: vec![Node::Element(child_root)],
             binding: None,
@@ -438,7 +465,12 @@ fn compile_element(
     }
     Ok(Element {
         tag,
-        style: InlineStyle::parse(attr("style").unwrap_or("")),
+        style: InlineStyle::parse_with_mobile(
+            attr("style").unwrap_or(""),
+            attr("mobile-style").unwrap_or(""),
+            responsive_styles(&attrs),
+            attr("data-rsc-inline-style").unwrap_or(""),
+        ),
         attrs,
         children,
         binding,
@@ -463,10 +495,13 @@ pub struct BoxValues {
 
 #[derive(Clone, Debug, Default)]
 pub struct InlineStyle {
+    pub mobile: Option<Box<InlineStyle>>,
+    pub responsive: Vec<ResponsiveStyle>,
+    pub(crate) inline: Option<Box<InlineStyle>>,
     pub display_flex: bool,
-    pub column: bool,
-    pub flex_wrap: bool,
-    pub flex_grow: bool,
+    pub column: Option<bool>,
+    pub flex_wrap: Option<bool>,
+    pub flex_grow: Option<bool>,
     pub gap: Option<f32>,
     pub padding: Option<BoxValues>,
     pub background: Option<u32>,
@@ -486,7 +521,120 @@ pub struct InlineStyle {
     pub scroll_y: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct ResponsiveStyle {
+    pub max_width: f32,
+    pub style: InlineStyle,
+}
+
+fn responsive_styles(attrs: &HashMap<String, String>) -> Vec<ResponsiveStyle> {
+    let mut entries = attrs
+        .iter()
+        .filter_map(|(name, value)| {
+            let order = name
+                .strip_prefix("data-rsc-responsive-")?
+                .parse::<usize>()
+                .ok()?;
+            let (max_width, declarations) = value.split_once('|')?;
+            let max_width = max_width.parse::<f32>().ok()?;
+            (max_width.is_finite() && max_width > 0.0).then_some((
+                order,
+                ResponsiveStyle {
+                    max_width,
+                    style: InlineStyle::parse(declarations),
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(order, _)| *order);
+    entries.into_iter().map(|(_, style)| style).collect()
+}
+
 impl InlineStyle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn flex(mut self) -> Self {
+        self.display_flex = true;
+        self
+    }
+
+    pub fn flex_direction(mut self, column: bool) -> Self {
+        self.column = Some(column);
+        self
+    }
+
+    pub fn flex_wrap(mut self, wrap: bool) -> Self {
+        self.flex_wrap = Some(wrap);
+        self
+    }
+
+    pub fn flex_grow(mut self, grow: bool) -> Self {
+        self.flex_grow = Some(grow);
+        self
+    }
+
+    pub fn gap(mut self, pixels: f32) -> Self {
+        self.gap = Some(pixels);
+        self
+    }
+
+    pub fn padding(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        self.padding = Some(BoxValues {
+            top,
+            right,
+            bottom,
+            left,
+        });
+        self
+    }
+
+    pub fn background_color(mut self, rgb: u32) -> Self {
+        self.background = Some(rgb & 0x00ff_ffff);
+        self
+    }
+
+    pub fn text_color(mut self, rgb: u32) -> Self {
+        self.color = Some(rgb & 0x00ff_ffff);
+        self
+    }
+
+    pub fn width(mut self, width: Length) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    pub fn height(mut self, height: Length) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    pub fn min_width(mut self, pixels: f32) -> Self {
+        self.min_width = Some(pixels);
+        self
+    }
+
+    pub fn max_width(mut self, pixels: f32) -> Self {
+        self.max_width = Some(pixels);
+        self
+    }
+
+    pub fn border_radius(mut self, pixels: f32) -> Self {
+        self.border_radius = Some(pixels);
+        self
+    }
+
+    pub fn justify_content(mut self, value: impl Into<String>) -> Self {
+        self.justify = Some(value.into());
+        self
+    }
+
+    pub fn align_items(mut self, value: impl Into<String>) -> Self {
+        self.align = Some(value.into());
+        self
+    }
+
     fn parse(source: &str) -> Self {
         let mut style = Self::default();
         for declaration in source.split(';') {
@@ -496,9 +644,9 @@ impl InlineStyle {
             let (name, value) = (name.trim(), value.trim());
             match name {
                 "display" => style.display_flex = value == "flex",
-                "flex-direction" => style.column = value == "column",
-                "flex-wrap" => style.flex_wrap = value == "wrap",
-                "flex" => style.flex_grow = value == "1",
+                "flex-direction" => style.column = Some(value == "column"),
+                "flex-wrap" => style.flex_wrap = Some(value == "wrap"),
+                "flex" => style.flex_grow = Some(value == "1"),
                 "gap" => style.gap = px_value(value),
                 "padding" => style.padding = box_values(value),
                 "background" | "background-color" => style.background = color(value),
@@ -522,6 +670,64 @@ impl InlineStyle {
             }
         }
         style
+    }
+
+    fn parse_with_mobile(
+        source: &str,
+        mobile_source: &str,
+        responsive: Vec<ResponsiveStyle>,
+        inline_source: &str,
+    ) -> Self {
+        let mut style = Self::parse(source);
+        style.responsive = responsive;
+        if !inline_source.trim().is_empty() {
+            style.inline = Some(Box::new(Self::parse(inline_source)));
+        }
+        if !mobile_source.trim().is_empty() {
+            style.mobile = Some(Box::new(Self::parse(mobile_source)));
+        }
+        style
+    }
+
+    pub fn for_viewport(&self, viewport_width: f32, mobile_breakpoint: Option<f32>) -> Self {
+        let mut style = self.clone();
+        style.mobile = None;
+        style.responsive.clear();
+        if mobile_breakpoint.is_some_and(|breakpoint| viewport_width <= breakpoint) {
+            if let Some(overrides) = &self.mobile {
+                style.apply_overrides(overrides);
+            }
+        }
+        for responsive in &self.responsive {
+            if viewport_width <= responsive.max_width {
+                style.apply_overrides(&responsive.style);
+            }
+        }
+        style
+    }
+
+    pub(crate) fn apply_overrides(&mut self, overrides: &InlineStyle) {
+        self.display_flex |= overrides.display_flex;
+        self.column = overrides.column.or(self.column);
+        self.flex_wrap = overrides.flex_wrap.or(self.flex_wrap);
+        self.flex_grow = overrides.flex_grow.or(self.flex_grow);
+        self.gap = overrides.gap.or(self.gap);
+        self.padding = overrides.padding.or(self.padding);
+        self.background = overrides.background.or(self.background);
+        self.color = overrides.color.or(self.color);
+        self.font_size = overrides.font_size.or(self.font_size);
+        self.font_weight = overrides.font_weight.or(self.font_weight);
+        self.border_color = overrides.border_color.or(self.border_color);
+        self.border_width = overrides.border_width.or(self.border_width);
+        self.border_radius = overrides.border_radius.or(self.border_radius);
+        self.width = overrides.width.or(self.width);
+        self.height = overrides.height.or(self.height);
+        self.min_width = overrides.min_width.or(self.min_width);
+        self.max_width = overrides.max_width.or(self.max_width);
+        self.margin_auto |= overrides.margin_auto;
+        self.justify = overrides.justify.clone().or(self.justify.clone());
+        self.align = overrides.align.clone().or(self.align.clone());
+        self.scroll_y |= overrides.scroll_y;
     }
 }
 

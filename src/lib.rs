@@ -71,11 +71,12 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     }
     let html = normalize_component_tags(html);
     let document = Html::parse_document(&html);
+    let stylesheet = component_styles(&document, input)?;
     let body = document
         .select(&Selector::parse("body").unwrap())
         .next()
         .ok_or("component needs <body>")?;
-    let tree = element_code(body);
+    let tree = element_code(body, &stylesheet);
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
@@ -167,13 +168,171 @@ fn normalize_component_tags(source: &str) -> String {
     out.push_str(rest);
     out
 }
-fn element_code(element: ElementRef<'_>) -> String {
-    let attrs = element
+
+#[derive(Clone)]
+struct CssRule {
+    selector: Selector,
+    max_width: Option<f32>,
+    declarations: String,
+}
+
+fn component_styles(document: &Html, input: &Path) -> Result<Vec<CssRule>, String> {
+    let style_selector = Selector::parse("style").expect("static style selector is valid");
+    let mut rules = Vec::new();
+    for style in document.select(&style_selector) {
+        let source = style.text().collect::<String>();
+        parse_stylesheet(&source, None, &mut rules).map_err(|error| {
+            format!(
+                "{} has an invalid component stylesheet: {error}",
+                input.display()
+            )
+        })?;
+    }
+    Ok(rules)
+}
+
+fn parse_stylesheet(
+    source: &str,
+    inherited_max_width: Option<f32>,
+    rules: &mut Vec<CssRule>,
+) -> Result<(), String> {
+    let source = strip_css_comments(source)?;
+    let mut remaining = source.as_str();
+    loop {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+        let Some(open) = remaining.find('{') else {
+            if remaining.trim().is_empty() {
+                break;
+            }
+            return Err(format!("expected '{{' after {}", remaining.trim()));
+        };
+        let header = remaining[..open].trim();
+        let close = matching_brace(remaining, open)
+            .ok_or_else(|| format!("missing closing '}}' for {header}"))?;
+        let body = &remaining[open + 1..close];
+        if let Some(condition) = header.strip_prefix("@media") {
+            let media_width = parse_media_max_width(condition)?;
+            let max_width = inherited_max_width
+                .map(|parent| parent.min(media_width))
+                .unwrap_or(media_width);
+            parse_stylesheet(body, Some(max_width), rules)?;
+        } else if !header.starts_with('@') {
+            let selector = Selector::parse(header)
+                .map_err(|error| format!("invalid selector {header:?}: {error:?}"))?;
+            rules.push(CssRule {
+                selector,
+                max_width: inherited_max_width,
+                declarations: body.trim().to_owned(),
+            });
+        }
+        remaining = &remaining[close + 1..];
+    }
+    Ok(())
+}
+
+fn strip_css_comments(source: &str) -> Result<String, String> {
+    let mut result = String::with_capacity(source.len());
+    let mut remaining = source;
+    while let Some(start) = remaining.find("/*") {
+        result.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 2..];
+        let Some(end) = after_start.find("*/") else {
+            return Err("unterminated CSS comment".into());
+        };
+        result.push(' ');
+        remaining = &after_start[end + 2..];
+    }
+    result.push_str(remaining);
+    Ok(result)
+}
+
+fn matching_brace(source: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, character) in source[open..].char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_media_max_width(condition: &str) -> Result<f32, String> {
+    let (_, value) = condition
+        .split_once("max-width")
+        .ok_or_else(|| format!("only max-width media queries are supported: {condition}"))?;
+    let value = value
+        .trim_start()
+        .strip_prefix(':')
+        .ok_or_else(|| format!("invalid max-width media query: {condition}"))?
+        .trim()
+        .split(')')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let number = value
+        .strip_suffix("px")
+        .unwrap_or(value)
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| format!("invalid max-width value: {condition}"))?;
+    if !number.is_finite() || number <= 0.0 {
+        return Err(format!(
+            "max-width must be a positive pixel width: {condition}"
+        ));
+    }
+    Ok(number)
+}
+
+fn element_code(element: ElementRef<'_>, stylesheet: &[CssRule]) -> String {
+    let mut attrs = element
         .value()
         .attrs()
+        .filter(|(key, _)| *key != "style")
         .map(|(k, v)| format!("({:?}.into(), {:?}.into())", k, v))
-        .collect::<Vec<_>>()
-        .join(",");
+        .collect::<Vec<_>>();
+
+    let base_declarations = stylesheet
+        .iter()
+        .filter(|rule| rule.max_width.is_none() && rule.selector.matches(&element))
+        .map(|rule| rule.declarations.as_str())
+        .filter(|declarations| !declarations.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !base_declarations.is_empty() {
+        attrs.push(format!(
+            "(\"style\".into(), {:?}.into())",
+            base_declarations.join(";")
+        ));
+    }
+    if let Some(inline) = element.value().attr("style") {
+        if !inline.trim().is_empty() {
+            attrs.push(format!(
+                "(\"data-rsc-inline-style\".into(), {:?}.into())",
+                inline
+            ));
+        }
+    }
+
+    for (index, rule) in stylesheet.iter().enumerate() {
+        if let Some(max_width) = rule.max_width.filter(|_| rule.selector.matches(&element)) {
+            attrs.push(format!(
+                "({:?}.into(), {:?}.into())",
+                format!("data-rsc-responsive-{index:04}"),
+                format!("{max_width}|{}", rule.declarations)
+            ));
+        }
+    }
+    let attrs = attrs.join(",");
     let children = element
         .children()
         .filter_map(|child| match child.value() {
@@ -181,8 +340,14 @@ fn element_code(element: ElementRef<'_>) -> String {
                 "gpui_rsc::TemplateNode::Text({:?}.into())",
                 t.trim()
             )),
-            HtmlNode::Element(_) => ElementRef::wrap(child)
-                .map(|e| format!("gpui_rsc::TemplateNode::Element({})", element_code(e))),
+            HtmlNode::Element(_) => ElementRef::wrap(child).and_then(|e| {
+                (e.value().name() != "style").then(|| {
+                    format!(
+                        "gpui_rsc::TemplateNode::Element({})",
+                        element_code(e, stylesheet)
+                    )
+                })
+            }),
             _ => None,
         })
         .collect::<Vec<_>>()

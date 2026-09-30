@@ -24,8 +24,14 @@ pub fn definition() -> Definition {
 }
 </script>
 <!doctype html>
-<html><body>
-      <section style="display:flex; flex-direction:column; gap:20px; flex:1; min-width:360px; background:#f9f5ef; color:#2d251f; border-radius:22px; padding:24px">
+<html><head>
+  <style>
+    @media (max-width: 768px) {
+      .mobile-card { width:100%; max-width:560px; min-width:0; padding:18px; gap:16px; }
+    }
+  </style>
+</head><body>
+      <section class="mobile-card profile-card" style="display:flex; flex-direction:column; gap:20px; flex:1; min-width:360px; background:#f9f5ef; color:#2d251f; border-radius:22px; padding:24px">
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px">
           <div style="display:flex; flex-direction:column; gap:4px"><h2 style="font-size:20px; font-weight:700">Cup prediction</h2><p style="font-size:11px; color:#8b7d70">Drag a score to adjust the recipe · 0–100</p></div>
           <output data-in="ratio" data-format="ratio" style="background:#eee5d9; border-radius:99px; padding:5px 12px; font-size:11px; color:#765b43; font-weight:600"></output>

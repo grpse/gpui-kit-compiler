@@ -24,9 +24,16 @@ pub fn definition() -> Definition {
 }
 </script>
 <!doctype html>
-<html><body>
-      <div style="display:flex; flex-direction:column; gap:20px; flex:1; min-width:360px">
-        <section style="display:flex; flex-direction:column; gap:18px; background:#211c17; border:1px solid #3b3128; border-radius:18px; padding:22px">
+<html><head>
+  <style>
+    @media (max-width: 768px) {
+      .controls-stack { width:100%; min-width:0; gap:16px; align-items:center; }
+      .mobile-card { width:100%; max-width:560px; min-width:0; padding:18px; }
+    }
+  </style>
+</head><body>
+      <div class="controls-stack" style="display:flex; flex-direction:column; gap:20px; flex:1; min-width:360px">
+        <section class="mobile-card recipe-card" style="display:flex; flex-direction:column; gap:18px; background:#211c17; border:1px solid #3b3128; border-radius:18px; padding:22px">
           <div style="display:flex; flex-direction:column; gap:4px">
             <h2 style="font-size:18px; font-weight:700; color:#f8f1e8">Brew recipe</h2>
             <p style="font-size:12px; color:#9f9284">The ingredients and brewing conditions</p>
@@ -68,7 +75,7 @@ pub fn definition() -> Definition {
           </div>
         </section>
 
-        <section style="display:flex; flex-direction:column; gap:18px; background:#211c17; border:1px solid #3b3128; border-radius:18px; padding:22px">
+        <section class="mobile-card actions-card" style="display:flex; flex-direction:column; gap:18px; background:#211c17; border:1px solid #3b3128; border-radius:18px; padding:22px">
           <div style="display:flex; flex-direction:column; gap:4px"><h2 style="font-size:18px; font-weight:700">What you did</h2><p style="font-size:12px; color:#9f9284">Simple actions that affect movement through the bed</p></div>
           <div style="display:flex; flex-direction:column; gap:7px"><div style="display:flex; justify-content:space-between"><label style="font-size:14px; font-weight:600">Number of pours</label><output data-in="pours" data-suffix=" pours" style="font-size:14px; font-weight:600; color:#f0b46b"></output></div><input id="pours" type="range" min="1" max="8" step="1" value="3" data-in-out="pours"></div>
           <div style="display:flex; flex-direction:column; gap:7px"><div style="display:flex; justify-content:space-between"><label style="font-size:14px; font-weight:600">Stirs</label><output data-in="stirs" style="font-size:14px; font-weight:600; color:#f0b46b"></output></div><input id="stirs" type="range" min="0" max="8" step="1" value="0" data-in-out="stirs"></div>
