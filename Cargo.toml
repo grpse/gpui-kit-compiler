@@ -1,0 +1,12 @@
+[package]
+name = "gpui-rsc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scraper = "0.24"
+gpui-kit = "0.7"
+async-channel = "2"
+
+[features]
+debug-fps = []
