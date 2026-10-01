@@ -35,9 +35,9 @@ impl TemplateElement {
             tag: tag.into(),
             attrs,
             children,
-            style: runtime::InlineStyle::new(),
-            mobile_style: runtime::InlineStyle::new(),
-            inline_style: runtime::InlineStyle::new(),
+            style: runtime::InlineStyle::default(),
+            mobile_style: runtime::InlineStyle::default(),
+            inline_style: runtime::InlineStyle::default(),
             render: None,
         }
     }

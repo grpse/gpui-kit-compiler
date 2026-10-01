@@ -16,6 +16,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use gpui::Refineable as _;
 
 pub struct HtmlView {
     title: String,
@@ -303,7 +304,7 @@ impl HtmlView {
         dynamic_styles: &[StyleRule],
     ) -> Div {
         let dynamic_style = dynamic_style_for_element(element, dynamic_styles);
-        dynamic_style.apply_to_gpui(container)
+        { let mut container = container; container.style().refine(&dynamic_style); container }
     }
 
     pub fn render_output(&self, element: &Element, container: Div) -> AnyElement {
@@ -350,13 +351,13 @@ impl HtmlView {
             .control_id
             .as_deref()
             .expect("range input needs an id");
-        let color = style.color;
+        let color = style.text.color;
         container
             .w_full()
             .when_some(self.sliders.get(key), |container, state| {
                 let slider = Slider::new(state);
                 let slider = if let Some(color) = color {
-                    slider.bg(rgb(color)).text_color(rgb(color))
+                    slider.bg(color).text_color(color)
                 } else {
                     slider
                 };
@@ -410,15 +411,7 @@ impl HtmlView {
                     .collect();
                 binding.set(&view.engine, Value::Arguments(values));
             }));
-        if let Some(color) = style.background {
-            button = button.bg(rgb(color));
-        }
-        if let Some(color) = style.color {
-            button = button.text_color(rgb(color));
-        }
-        if let Some(radius) = style.border_radius {
-            button = button.rounded(px(radius));
-        }
+        button.style().refine(&style);
         container.child(button).into_any_element()
     }
 }
@@ -495,26 +488,26 @@ fn style_for_element(
 ) -> InlineStyle {
     let mut style = element.style.clone();
     if mobile_breakpoint.is_some_and(|breakpoint| viewport_width <= breakpoint) {
-        style.apply_overrides(&element.mobile_style);
+        style.refine(&element.mobile_style);
     }
     for rule in responsive_styles {
         if dynamic_selector_matches(&rule.selector, element) {
-            style.apply_overrides(&rule.style);
+            style.refine(&rule.style);
         }
     }
-    style.apply_overrides(&dynamic_style_for_element(element, dynamic_styles));
+    style.refine(&dynamic_style_for_element(element, dynamic_styles));
     if let Some(bound_style) = bound_style {
-        style.apply_overrides(bound_style);
+        style.refine(bound_style);
     }
-    style.apply_overrides(&element.inline_style);
+    style.refine(&element.inline_style);
     style
 }
 
 fn dynamic_style_for_element(element: &Element, dynamic_styles: &[StyleRule]) -> InlineStyle {
-    let mut style = InlineStyle::new();
+    let mut style = InlineStyle::default();
     for rule in dynamic_styles {
         if dynamic_selector_matches(&rule.selector, element) {
-            style.apply_overrides(&rule.style);
+            style.refine(&rule.style);
         }
     }
     style

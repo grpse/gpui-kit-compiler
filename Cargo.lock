@@ -117,7 +117,9 @@ dependencies = [
 name = "gpui-rsc"
 version = "0.1.0"
 dependencies = [
+ "quote",
  "scraper",
+ "syn 2.0.119",
 ]
 
 [[package]]

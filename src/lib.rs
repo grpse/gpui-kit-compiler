@@ -1,5 +1,6 @@
-//! Compiler for single-file Rust components. `.inter.rs` files contain Rust tokens
-//! and are consumed by `include!` in a normal Cargo build.
+#[cfg(feature = "compiler")]
+mod style_codegen;
+// Compiler for single-file Rust components.
 #[cfg(feature = "compiler")]
 use scraper::{ElementRef, Html, Node as HtmlNode, Selector};
 #[cfg(feature = "compiler")]
@@ -119,6 +120,7 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
         struct_name,
         title
     );
+    let generated = style_codegen::translate(&generated)?;
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -657,7 +659,7 @@ fn element_code(
     let mut style_builders = Vec::new();
     let base_gpui_calls = gpui_style_calls(&base_declarations)?;
     if !base_styles.is_empty() && kit_control {
-        style_builders.push(format!(".with_style({})", chain_styles(base_styles)));
+        style_builders.push(format!(".with_style({})", style_expression(&base_declarations)?));
     }
     let mobile_style = element
         .value()
@@ -782,7 +784,7 @@ fn element_code(
             render_body.push_str("    let styles = styles(context);\n");
         }
         render_body.push_str(&format!(
-            "    let bound_class_style: gpui_rsc::runtime::Style = {expression};\n    container = bound_class_style.apply_to_gpui(container);\n"
+            "    let bound_class_style: gpui_rsc::runtime::Style = {expression};\n    gpui::Refineable::refine(container.style(), &bound_class_style);\n"
         ));
     }
     if let Some(inline_style) = inline_style {
@@ -834,16 +836,6 @@ fn element_code(
 }
 
 #[cfg(feature = "compiler")]
-fn chain_styles(styles: Vec<&str>) -> String {
-    let prefix = "gpui_rsc::runtime::InlineStyle::new()";
-    let calls = styles
-        .iter()
-        .filter_map(|style| style.strip_prefix(prefix))
-        .collect::<String>();
-    format!("{prefix}{calls}")
-}
-
-#[cfg(feature = "compiler")]
 fn animation_declaration(source: &str) -> Option<&str> {
     source
         .split(';')
@@ -855,87 +847,8 @@ fn animation_declaration(source: &str) -> Option<&str> {
 
 #[cfg(feature = "compiler")]
 fn style_expression(source: &str) -> Result<String, String> {
-    let mut calls = Vec::new();
-    for declaration in source
-        .split(';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        let (name, value) = declaration
-            .split_once(':')
-            .ok_or_else(|| format!("invalid style declaration {declaration:?}"))?;
-        let (name, value) = (name.trim(), value.trim());
-        let call = match name {
-            "display" if value == "flex" => ".flex()".to_owned(),
-            "display" => return Err(format!("unsupported display value {value:?}")),
-            "flex-direction" => match value {
-                "column" => ".flex_direction(true)".to_owned(),
-                "row" => ".flex_direction(false)".to_owned(),
-                _ => return Err(format!("unsupported flex-direction value {value:?}")),
-            },
-            "flex-wrap" => match value {
-                "wrap" => ".flex_wrap(true)".to_owned(),
-                "nowrap" => ".flex_wrap(false)".to_owned(),
-                _ => return Err(format!("unsupported flex-wrap value {value:?}")),
-            },
-            "flex" => match value {
-                "1" => ".flex_grow(true)".to_owned(),
-                "none" | "0" => ".flex_grow(false)".to_owned(),
-                _ => return Err(format!("unsupported flex value {value:?}")),
-            },
-            "gap" => format!(".gap({})", css_number(value)?),
-            "padding" => {
-                let values = css_box_values(value)?;
-                format!(
-                    ".padding({}, {}, {}, {})",
-                    values[0], values[1], values[2], values[3]
-                )
-            }
-            "background" | "background-color" => {
-                format!(".background_color({})", css_color(value)?)
-            }
-            "color" => format!(".text_color({})", css_color(value)?),
-            "font-size" => format!(".font_size({})", css_number(value)?),
-            "font-weight" => format!(".font_weight({})", css_integer(value)?),
-            "border" => {
-                let mut parts = value.split_whitespace();
-                let width = parts.next().ok_or("border needs a width")?;
-                let color = parts.last().ok_or("border needs a color")?;
-                format!(".border({}, {})", css_number(width)?, css_color(color)?)
-            }
-            "border-radius" => format!(".border_radius({})", css_number(value)?),
-            "width" => format!(".width({})", css_length(value)?),
-            "height" => format!(".height({})", css_length(value)?),
-            "min-width" => format!(".min_width({})", css_number(value)?),
-            "max-width" => format!(".max_width({})", css_number(value)?),
-            "margin" if value == "auto" => ".margin_auto()".to_owned(),
-            "margin" => return Err(format!("unsupported margin value {value:?}")),
-            "justify-content" => format!(".justify_content({value:?})"),
-            "align-items" => format!(".align_items({value:?})"),
-            "position" if value == "relative" || value == "absolute" => String::new(),
-            "top" | "right" | "bottom" | "left" => {
-                css_number(value)?;
-                String::new()
-            }
-            "overflow" if value == "hidden" => String::new(),
-            "opacity" => {
-                css_opacity(value)?;
-                String::new()
-            }
-            "animation" => String::new(),
-            "overflow-y" => match value {
-                "auto" | "scroll" => ".overflow_y(true)".to_owned(),
-                "hidden" | "visible" => ".overflow_y(false)".to_owned(),
-                _ => return Err(format!("unsupported overflow-y value {value:?}")),
-            },
-            _ => return Err(format!("unsupported CSS property {name:?}")),
-        };
-        calls.push(call);
-    }
-    Ok(format!(
-        "gpui_rsc::runtime::InlineStyle::new(){}",
-        calls.join("")
-    ))
+    let calls = gpui_style_calls(source)?;
+    Ok(format!("{{ use gpui_kit::*; let mut value = div(){calls}; value.style().clone() }}"))
 }
 
 #[cfg(feature = "compiler")]

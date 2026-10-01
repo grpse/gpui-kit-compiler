@@ -5,10 +5,12 @@ edition = "2024"
 
 [dependencies]
 scraper = { version = "0.24", optional = true }
+syn = { version = "2", features = ["full", "visit-mut"], optional = true }
+quote = { version = "1", optional = true }
 
 [features]
 default = ["compiler"]
-compiler = ["dep:scraper"]
+compiler = ["dep:scraper", "dep:syn", "dep:quote"]
 debug-fps = []
 
 [[bin]]
