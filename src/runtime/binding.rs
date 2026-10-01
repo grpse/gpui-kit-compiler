@@ -1,5 +1,5 @@
 //! Binds a compiler-generated element tree to application state and GPUI Kit.
-use crate::runtime::{Binding, Definition, Direction, OutputFormatter, Snapshot, Value};
+use crate::runtime::{Binding, Definition, Direction, OutputFormatter, SelectOption, Snapshot, Value};
 
 use crate::{RenderFn, TemplateElement, TemplateNode};
 use std::collections::{HashMap, HashSet};
@@ -50,7 +50,7 @@ pub enum Control {
     Select {
         id: String,
         binding: Binding,
-        options: Vec<String>,
+        options: Vec<SelectOption>,
         default: String,
     },
 }
@@ -373,35 +373,46 @@ fn compile_element(
                     });
                 }
                 "select" => {
-                    let options = element
-                        .children
-                        .iter()
-                        .filter_map(|child| match child {
-                            TemplateNode::Element(e) if e.tag == "option" => Some((
-                                e.attr("value").map(str::to_owned).unwrap_or_else(|| {
-                                    e.children
+                    let options_key = attr("id").unwrap_or(&id);
+                    let options = def.select_options.get(options_key).cloned().unwrap_or_else(|| {
+                        element
+                            .children
+                            .iter()
+                            .filter_map(|child| match child {
+                                TemplateNode::Element(e) if e.tag == "option" => {
+                                    let label = e
+                                        .children
                                         .iter()
                                         .find_map(|node| match node {
-                                            TemplateNode::Text(t) => Some(t.clone()),
+                                            TemplateNode::Text(text) => Some(text.clone()),
                                             _ => None,
                                         })
-                                        .unwrap_or_default()
-                                }),
-                                e.attr("selected").is_some(),
-                            )),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
+                                        .unwrap_or_default();
+                                    Some(SelectOption {
+                                        value: e
+                                            .attr("value")
+                                            .map(str::to_owned)
+                                            .unwrap_or_else(|| label.clone()),
+                                        label,
+                                        selected: e.attr("selected").is_some(),
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                    });
                     let default = options
                         .iter()
-                        .find(|(_, s)| *s)
+                        .find(|option| option.selected)
                         .or_else(|| options.first())
-                        .map(|(v, _)| v.clone())
-                        .ok_or_else(|| format!("{id} needs <option>"))?;
+                        .map(|option| option.value.clone())
+                        .ok_or_else(|| {
+                            format!("{id} needs <option> children or with_select_options")
+                        })?;
                     controls.push(Control::Select {
                         id: id.clone(),
                         binding: source.clone(),
-                        options: options.into_iter().map(|(v, _)| v).collect(),
+                        options,
                         default,
                     });
                 }

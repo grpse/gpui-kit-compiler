@@ -1,6 +1,6 @@
 <script>
 use gpui_rsc::{component, in_param};
-use gpui_rsc::runtime::{Definition, InlineStyle as Style, Length, StyleContext, Value};
+use gpui_rsc::runtime::{Definition, InlineStyle as Style, StyleContext, Value};
 
 pub fn definition() -> Definition {
     component! {
@@ -14,7 +14,7 @@ fn number(context: &StyleContext<'_>, key: &str, fallback: f32) -> f32 {
     context.snapshot.get(key).and_then(Value::number).unwrap_or(fallback)
 }
 
-pub struct PreviewStyles { pub coffee: Style, pub liquid: Style }
+pub struct PreviewStyles { pub liquid: Style }
 
 pub fn styles(context: &StyleContext<'_>) -> PreviewStyles {
     let strength = ((number(context, "profile.intensity", 55.0) * 0.5
@@ -24,7 +24,7 @@ pub fn styles(context: &StyleContext<'_>) -> PreviewStyles {
     let coffee = (channel(0xd8, 0x48) << 16) | (channel(0x90, 0x23) << 8) | channel(0x4e, 0x15);
     let water = number(context, "recipe.water", 300.0);
     let level = (0.24 + ((water - 100.0) / 500.0).clamp(0.0, 1.0) * 0.62).clamp(0.2, 0.88);
-    PreviewStyles { coffee: Style::new().background_color(coffee), liquid: Style::new().background_color(coffee).height(Length::Percent(level)) }
+    PreviewStyles { liquid: Style::new().background_color(coffee).height(Length::Percent(level)) }
 }
 </script>
 <!doctype html>

@@ -1,6 +1,6 @@
 <script>
 use gpui_rsc::{component, in_param};
-use gpui_rsc::runtime::{Definition, InlineStyle as Style, Length, StyleContext, Value};
+use gpui_rsc::runtime::{Definition, InlineStyle as Style, StyleContext, Value};
 
 pub fn definition() -> Definition {
     component! {

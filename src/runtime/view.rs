@@ -185,11 +185,15 @@ impl HtmlView {
                 } => {
                     let selected = options
                         .iter()
-                        .position(|value| value == &default)
+                        .position(|option| option.value == default)
                         .unwrap_or(0);
+                    let labels = options
+                        .iter()
+                        .map(|option| option.label.clone())
+                        .collect();
                     let state = cx.new(|cx| {
                         SelectState::new(
-                            options,
+                            labels,
                             Some(IndexPath::default().row(selected)),
                             window,
                             cx,
@@ -201,7 +205,11 @@ impl HtmlView {
                         move |view, _, event: &SelectEvent<Vec<String>>, _, _| {
                             let SelectEvent::Confirm(value) = event;
                             if let Some(value) = value {
-                                binding.set(&view.engine, Value::Text(value.clone()));
+                                if let Some(option) =
+                                    options.iter().find(|option| option.label == *value)
+                                {
+                                    binding.set(&view.engine, Value::Text(option.value.clone()));
+                                }
                             }
                         },
                     ));
@@ -230,9 +238,15 @@ impl HtmlView {
                 state.update(cx, |slider, cx| slider.set_value(value, window, cx));
             }
             if let (Some(state), Value::Text(value)) = (self.selects.get(id), value) {
-                state.update(cx, |select, cx| {
-                    select.set_selected_value(&value, window, cx)
-                });
+                let label = match control {
+                    Control::Select { options, .. } => options
+                        .iter()
+                        .find(|option| option.value == value)
+                        .map(|option| option.label.clone())
+                        .unwrap_or(value),
+                    Control::Range { .. } => value,
+                };
+                state.update(cx, |select, cx| select.set_selected_value(&label, window, cx));
             }
         }
     }
@@ -338,6 +352,35 @@ impl HtmlView {
                 container.child(Select::new(state).w_full())
             })
             .into_any_element()
+    }
+
+    pub fn render_if(
+        &self,
+        element: &Element,
+        mut container: Div,
+        viewport_width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected_branch = match element
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.get(&self.snapshot))
+        {
+            Some(Value::Text(value))
+                if element.attr("data-rsc-equals") == Some(value.as_str()) =>
+            {
+                "rsc-then"
+            }
+            _ => "rsc-else",
+        };
+        for child in &element.children {
+            if let Node::Element(branch) = child {
+                if branch.tag == selected_branch {
+                    container = container.child(self.render_node(child, viewport_width, cx));
+                }
+            }
+        }
+        container.into_any_element()
     }
 
     pub fn render_button(

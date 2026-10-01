@@ -4,6 +4,7 @@ use gpui_rsc::{in_out_param, out_param};
 use gpui_rsc::{component, runtime::Definition};
 
 pub fn definition() -> Definition {
+    let methods = ["V60", "French press", "AeroPress", "Espresso"];
     component! {
         name: "coffee-variables-form",
         imports: [],
@@ -54,10 +55,7 @@ pub fn definition() -> Definition {
           <div class="field">
             <label class="field-label">Brewing method</label>
             <select id="method" data-in-out="method" class="field-select">
-              <option value="V60" selected>V60</option>
-              <option value="French press">French press</option>
-              <option value="AeroPress">AeroPress</option>
-              <option value="Espresso">Espresso</option>
+              {methods.iter().map(|&method| => <option value={method}>{method}</option>)}
             </select>
             <small class="field-help">Choose the brewer you used.</small>
           </div>

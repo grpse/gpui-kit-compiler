@@ -17,25 +17,36 @@ pub fn definition() -> Definition {
             in_param!("intensity"),
             in_param!("bitterness"),
             in_param!("body"),
+            in_param!("method"),
         ],
     }
+    .with_template(selected_preview())
 }
+
+fn selected_preview() -> gpui_rsc::TemplateElement {
+    let preview = {if method == "V60" {
+        <div class="preview-gallery"><component class="method-preview" name="v60-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+    } else {
+        {if method == "French press" {
+            <div class="preview-gallery"><component class="method-preview" name="french-press-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+        } else {
+            {if method == "AeroPress" {
+                <div class="preview-gallery"><component class="method-preview" name="aeropress-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+            } else {
+                <div class="preview-gallery"><component class="method-preview" name="espresso-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+            }}
+        }}
+    }};
+    preview
+}
+
 </script>
 <!doctype html>
 <html><head>
   <style>
-    .preview-gallery { display:flex; flex-wrap:wrap; gap:16px; width:100%; min-width:0; }
-    .method-preview { display:flex; flex:1; min-width:240px; }
-    @media (max-width: 768px) {
-      .preview-gallery { flex-direction:column; }
-      .method-preview { width:100%; min-width:0; }
-    }
+    .preview-gallery { display:flex; flex-direction:column; width:100%; min-width:0; }
+    .method-preview { display:flex; flex:1; width:100%; min-width:0; }
   </style>
 </head><body>
-  <div class="preview-gallery">
-    <component class="method-preview" name="v60-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" />
-    <component class="method-preview" name="french-press-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" />
-    <component class="method-preview" name="aeropress-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" />
-    <component class="method-preview" name="espresso-preview" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" />
-  </div>
+  <div class="preview-gallery"></div>
 </body></html>

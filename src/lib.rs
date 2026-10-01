@@ -39,8 +39,11 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     if html.trim().is_empty() {
         return Err(format!("{} has no HTML", input.display()));
     }
-    let html = normalize_component_tags(html)?;
-    let (html, class_bindings) = extract_class_bindings(&html)?;
+    let (html, select_option_refs) = extract_select_option_refs(html)?;
+    let html = expand_template_expressions(&html)?;
+    let html = expand_template_interpolations(&html)?;
+    let html = normalize_component_tags(&html)?;
+    let (html, mut class_bindings) = extract_class_bindings(&html)?;
     let document = Html::parse_document(&html);
     let (stylesheet, keyframes) = component_styles(&document, input)?;
     let stem = input
@@ -61,6 +64,16 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
         &mut next_style_id,
         &mut gpui_functions,
     )?;
+    let script = expand_script_option_mappings(script)?;
+    let script = expand_script_template_expressions(
+        &script,
+        &stylesheet,
+        &keyframes,
+        &mut class_bindings,
+        &mut next_style_id,
+        &mut gpui_functions,
+    )?;
+    let script = inject_select_options(&script, &select_option_refs)?;
     let title = document
         .select(&Selector::parse("title").unwrap())
         .next()
@@ -127,6 +140,145 @@ pub fn compile_directory(directory: &Path, output: &Path) -> Result<Vec<PathBuf>
     Ok(outputs)
 }
 #[cfg(feature = "compiler")]
+fn extract_select_option_refs(source: &str) -> Result<(String, Vec<(String, String)>), String> {
+    let mut output = String::with_capacity(source.len());
+    let mut refs = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("<select") {
+        let start = cursor + relative;
+        let Some(boundary) = source.as_bytes().get(start + "<select".len()) else {
+            break;
+        };
+        if !boundary.is_ascii_whitespace() && *boundary != b'>' {
+            output.push_str(&source[cursor..start + 1]);
+            cursor = start + 1;
+            continue;
+        }
+        let tag_end = start + html_tag_end(&source[start..])?;
+        let open_tag = &source[start..tag_end];
+        let close_start = source[tag_end..]
+            .find("</select>")
+            .map(|index| tag_end + index)
+            .ok_or("<select> needs a closing tag")?;
+        let close_end = close_start + "</select>".len();
+        let children = &source[tag_end..close_start];
+        let trimmed = children.trim();
+        let (variable, expression_start, expression_end) =
+            if trimmed.starts_with('{') && trimmed.ends_with('}') {
+                let expression_start = children.find('{').unwrap();
+                let expression_end = children.rfind('}').unwrap() + 1;
+                let expression = trimmed[1..trimmed.len() - 1].trim();
+                if is_simple_rust_identifier(expression) {
+                    (
+                        Some(expression.to_owned()),
+                        expression_start,
+                        expression_end,
+                    )
+                } else if expression.contains("=>") {
+                    (
+                        Some(expand_script_option_mappings(expression)?),
+                        expression_start,
+                        expression_end,
+                    )
+                } else {
+                    (None, 0, 0)
+                }
+            } else {
+                (None, 0, 0)
+            };
+        if let Some(variable) = variable {
+            let id = html_attribute(open_tag, "id")
+                .ok_or("a select with `{options}` needs an `id` attribute")?;
+            refs.push((id, variable));
+            output.push_str(&source[cursor..tag_end]);
+            output.push_str(&children[..expression_start]);
+            output.push_str(&children[expression_end..]);
+            output.push_str(&source[close_start..close_end]);
+        } else {
+            output.push_str(&source[cursor..close_end]);
+        }
+        cursor = close_end;
+    }
+    output.push_str(&source[cursor..]);
+    Ok((output, refs))
+}
+
+#[cfg(feature = "compiler")]
+fn html_attribute(tag: &str, name: &str) -> Option<String> {
+    let mut cursor = 1;
+    while cursor < tag.len() {
+        while tag
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            cursor += 1;
+        }
+        let key_start = cursor;
+        while tag
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'=' && *byte != b'>')
+        {
+            cursor += 1;
+        }
+        if key_start == cursor {
+            break;
+        }
+        let key = &tag[key_start..cursor];
+        while tag
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            cursor += 1;
+        }
+        if tag.as_bytes().get(cursor) != Some(&b'=') {
+            continue;
+        }
+        cursor += 1;
+        while tag
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            cursor += 1;
+        }
+        let quote = *tag.as_bytes().get(cursor)?;
+        if quote != b'\'' && quote != b'"' {
+            return None;
+        }
+        cursor += 1;
+        let value_start = cursor;
+        while tag
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(|byte| *byte != quote)
+        {
+            cursor += 1;
+        }
+        let value_end = cursor;
+        cursor += 1;
+        if key == name {
+            return Some(tag[value_start..value_end].to_owned());
+        }
+    }
+    None
+}
+
+#[cfg(feature = "compiler")]
+fn is_simple_rust_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        && !value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+}
+
+#[cfg(feature = "compiler")]
 fn normalize_component_tags(source: &str) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = source;
@@ -153,7 +305,418 @@ fn normalize_component_tags(source: &str) -> Result<String, String> {
 }
 
 #[cfg(feature = "compiler")]
+fn expand_template_expressions(source: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("{if") {
+        let start = cursor + relative;
+        let Some(next) = source.as_bytes().get(start + 3).copied() else {
+            break;
+        };
+        if !next.is_ascii_whitespace() {
+            output.push_str(&source[cursor..start + 1]);
+            cursor = start + 1;
+            continue;
+        }
+        let outer_end = rust_brace_end(source, start)?;
+        let condition_start = start + 3;
+        let body_start = rust_block_start(source, condition_start, outer_end)?;
+        let condition = source[condition_start..body_start].trim();
+        let (binding, expected) = parse_template_condition(condition)?;
+        let body_end = rust_brace_end(source, body_start)?;
+        let body = expand_template_expressions(&source[body_start + 1..body_end])?;
+
+        let mut else_body = None;
+        let mut expression_end = body_end;
+        let after_body = skip_ascii_whitespace(source, body_end + 1);
+        if source[after_body..outer_end].starts_with("else") {
+            let else_word_end = after_body + "else".len();
+            let else_open = skip_ascii_whitespace(source, else_word_end);
+            if source.as_bytes().get(else_open) != Some(&b'{') {
+                return Err("template `else` needs a braced body".into());
+            }
+            let else_close = rust_brace_end(source, else_open)?;
+            if else_close > outer_end {
+                return Err("template `else` extends outside its `{if ...}` expression".into());
+            }
+            else_body = Some(expand_template_expressions(
+                &source[else_open + 1..else_close],
+            )?);
+            expression_end = else_close;
+        }
+        if expression_end != outer_end - 1 {
+            let trailing = source[expression_end + 1..outer_end].trim();
+            if !trailing.is_empty() {
+                return Err(format!("unexpected content in template `if`: {trailing:?}"));
+            }
+        }
+
+        output.push_str(&source[cursor..start]);
+        output.push_str(&format!(
+            "<rsc-if data-in=\"{}\" data-rsc-equals=\"{}\"><rsc-then>{}</rsc-then>",
+            escape_html_attribute(&binding),
+            escape_html_attribute(&expected),
+            body,
+        ));
+        if let Some(else_body) = else_body {
+            output.push_str(&format!("<rsc-else>{else_body}</rsc-else>"));
+        }
+        output.push_str("</rsc-if>");
+        cursor = outer_end + 1;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn expand_template_interpolations(source: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut in_tag = false;
+    let mut quote = None;
+    while index < source.len() {
+        let character = source[index..].chars().next().unwrap();
+        if let Some(delimiter) = quote {
+            output.push(character);
+            if character == delimiter {
+                quote = None;
+            }
+            index += character.len_utf8();
+            continue;
+        }
+        if in_tag {
+            output.push(character);
+            match character {
+                '\'' | '"' => quote = Some(character),
+                '>' => in_tag = false,
+                _ => {}
+            }
+            index += character.len_utf8();
+            continue;
+        }
+        if character == '<' {
+            in_tag = true;
+            output.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+        if character == '{' {
+            let end = rust_brace_end(source, index)?;
+            let expression = source[index + 1..end].trim();
+            if let Some(binding) = template_binding_path(expression) {
+                output.push_str(&format!(
+                    "<rsc-value data-in=\"{}\"></rsc-value>",
+                    escape_html_attribute(&binding)
+                ));
+                index = end + 1;
+                continue;
+            }
+        }
+        output.push(character);
+        index += character.len_utf8();
+    }
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn expand_script_option_mappings(source: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("=>") {
+        let arrow = cursor + relative;
+        let option_start = skip_ascii_whitespace(source, arrow + 2);
+        if !source[option_start..].starts_with("<option") {
+            output.push_str(&source[cursor..arrow + 2]);
+            cursor = arrow + 2;
+            continue;
+        }
+        let Some(map_start) = source[..arrow].rfind(".map(") else {
+            return Err("an option template mapping needs `.map(|item| => ...)`".into());
+        };
+        let closure = source[map_start + ".map(".len()..arrow].trim();
+        if !closure.starts_with('|') || !closure.ends_with('|') || closure.len() < 3 {
+            return Err("an option template mapping needs a Rust closure pattern".into());
+        }
+
+        let option_tag_end = option_start + html_tag_end(&source[option_start..])?;
+        let option_tag = &source[option_start..option_tag_end];
+        let value_open = option_tag
+            .find("value=")
+            .map(|index| index + "value=".len())
+            .ok_or("an option template needs `value=[expression]`")?;
+        let value_open = skip_ascii_whitespace(option_tag, value_open);
+        let (value_start, value_close) = match option_tag.as_bytes().get(value_open) {
+            Some(b'[') => (
+                value_open + 1,
+                option_tag[value_open + 1..]
+                    .find(']')
+                    .map(|index| value_open + index + 1)
+                    .ok_or("unclosed option value expression")?,
+            ),
+            Some(b'{') => (value_open + 1, rust_brace_end(option_tag, value_open)?),
+            _ => {
+                return Err(
+                    "an option template needs `value=[expression]` or `value={expression}`".into(),
+                );
+            }
+        };
+        let value = option_tag[value_start..value_close].trim();
+        if value.is_empty() {
+            return Err("an option value expression cannot be empty".into());
+        }
+
+        let close_tag = "</option>";
+        let close_start = source[option_tag_end..]
+            .find(close_tag)
+            .map(|index| option_tag_end + index)
+            .ok_or("an option template needs `</option>`")?;
+        let label_source = &source[option_tag_end..close_start];
+        let label_open = label_source
+            .find('{')
+            .ok_or("an option template needs `{label}`")?;
+        let label_end = rust_brace_end(label_source, label_open)?;
+        if !label_source[..label_open].trim().is_empty()
+            || !label_source[label_end + 1..].trim().is_empty()
+        {
+            return Err("an option template label must be a single `{expression}`".into());
+        }
+        let label = label_source[label_open + 1..label_end].trim();
+        if label.is_empty() {
+            return Err("an option label expression cannot be empty".into());
+        }
+
+        output.push_str(&source[cursor..arrow]);
+        output.push_str(&format!(
+            "gpui_rsc::runtime::SelectOption::new(({value}).to_string(), ({label}).to_string())"
+        ));
+        cursor = close_start + close_tag.len();
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn expand_script_template_expressions(
+    source: &str,
+    stylesheet: &[CssRule],
+    keyframes: &HashMap<String, Keyframes>,
+    class_bindings: &mut HashMap<usize, String>,
+    next_style_id: &mut usize,
+    gpui_functions: &mut Vec<String>,
+) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("{if") {
+        let start = cursor + relative;
+        let Some(next) = source.as_bytes().get(start + 3).copied() else {
+            break;
+        };
+        if !next.is_ascii_whitespace() {
+            output.push_str(&source[cursor..start + 1]);
+            cursor = start + 1;
+            continue;
+        }
+        let Ok(outer_end) = rust_brace_end(source, start) else {
+            output.push_str(&source[cursor..start + 1]);
+            cursor = start + 1;
+            continue;
+        };
+        let condition_start = start + 3;
+        let Ok(body_start) = rust_block_start(source, condition_start, outer_end) else {
+            output.push_str(&source[cursor..start + 1]);
+            cursor = start + 1;
+            continue;
+        };
+        if parse_template_condition(source[condition_start..body_start].trim()).is_err()
+            || source[skip_ascii_whitespace(source, body_start + 1)..].starts_with('<') == false
+        {
+            output.push_str(&source[cursor..start + 1]);
+            cursor = start + 1;
+            continue;
+        }
+
+        let template = expand_template_expressions(&source[start..outer_end + 1])?;
+        let template = expand_template_interpolations(&template)?;
+        let template = normalize_component_tags(&template)?;
+        let class_binding_offset = class_bindings.len();
+        let (template, local_bindings) =
+            extract_class_bindings_at(&template, class_binding_offset)?;
+        class_bindings.extend(local_bindings);
+
+        let document = Html::parse_document(&format!("<html><body>{template}</body></html>"));
+        let conditional = document
+            .select(&Selector::parse("body > rsc-if").unwrap())
+            .next()
+            .ok_or("script template conditional must have one root element")?;
+        let expression = element_code(
+            conditional,
+            stylesheet,
+            keyframes,
+            class_bindings,
+            next_style_id,
+            gpui_functions,
+        )?;
+        output.push_str(&source[cursor..start]);
+        output.push_str(&expression);
+        cursor = outer_end + 1;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn inject_select_options(source: &str, refs: &[(String, String)]) -> Result<String, String> {
+    if refs.is_empty() {
+        return Ok(source.to_owned());
+    }
+    let mut file = syn::parse_file(source)
+        .map_err(|error| format!("cannot attach select option variables: {error}"))?;
+    let definition = file.items.iter_mut().find_map(|item| match item {
+        syn::Item::Fn(function) if function.sig.ident == "definition" => Some(function),
+        _ => None,
+    });
+    let definition =
+        definition.ok_or("select `{options}` needs a script `definition()` function")?;
+    let tail = definition
+        .block
+        .stmts
+        .last_mut()
+        .ok_or("script `definition()` needs to return a Definition")?;
+    let mut expression = match tail {
+        syn::Stmt::Expr(expression, None) => expression.clone(),
+        syn::Stmt::Macro(statement) if statement.semi_token.is_none() => {
+            syn::Expr::Macro(syn::ExprMacro {
+                attrs: statement.attrs.clone(),
+                mac: statement.mac.clone(),
+            })
+        }
+        _ => return Err("script `definition()` must end with a Definition expression".into()),
+    };
+    for (id, variable) in refs {
+        let id = syn::parse_str::<syn::LitStr>(&format!("{id:?}"))
+            .map_err(|error| format!("invalid select id: {error}"))?;
+        let variable = syn::parse_str::<syn::Expr>(variable)
+            .map_err(|error| format!("invalid select options variable: {error}"))?;
+        expression = syn::parse_quote!((#expression).with_select_options(#id, #variable));
+    }
+    *tail = syn::Stmt::Expr(expression, None);
+    Ok(quote::quote!(#file).to_string())
+}
+
+#[cfg(feature = "compiler")]
+fn template_binding_path(expression: &str) -> Option<String> {
+    let binding = expression
+        .trim()
+        .strip_prefix("data.")
+        .unwrap_or(expression.trim());
+    if binding.is_empty()
+        || !binding
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        || binding
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(binding.to_owned())
+}
+
+#[cfg(feature = "compiler")]
+fn rust_block_start(source: &str, start: usize, end: usize) -> Result<usize, String> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (relative, character) in source[start..end].char_indices() {
+        let index = start + relative;
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+        } else if character == '\'' || character == '"' {
+            quote = Some(character);
+        } else if character == '{' {
+            return Ok(index);
+        }
+    }
+    Err("template `if` needs a braced body".into())
+}
+
+#[cfg(feature = "compiler")]
+fn parse_template_condition(condition: &str) -> Result<(String, String), String> {
+    let (binding, value) = condition
+        .split_once("===")
+        .or_else(|| condition.split_once("=="))
+        .ok_or_else(|| format!("unsupported template condition {condition:?}"))?;
+    let binding = binding
+        .trim()
+        .strip_prefix("data.")
+        .unwrap_or(binding.trim());
+    if binding.is_empty()
+        || !binding
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        || binding
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid template binding in condition {condition:?}"
+        ));
+    }
+    let value = value.trim();
+    let quote = value
+        .chars()
+        .next()
+        .ok_or("template condition needs a value")?;
+    if (quote != '"' && quote != '\'') || !value.ends_with(quote) || value.len() < 2 {
+        return Err(format!(
+            "template condition needs a quoted value: {condition:?}"
+        ));
+    }
+    let value = &value[1..value.len() - 1];
+    Ok((
+        binding.to_owned(),
+        value.replace("\\\"", "\"").replace("\\'", "'"),
+    ))
+}
+
+#[cfg(feature = "compiler")]
+fn skip_ascii_whitespace(source: &str, mut index: usize) -> usize {
+    while source
+        .as_bytes()
+        .get(index)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        index += 1;
+    }
+    index
+}
+
+#[cfg(feature = "compiler")]
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+#[cfg(feature = "compiler")]
 fn extract_class_bindings(source: &str) -> Result<(String, HashMap<usize, String>), String> {
+    extract_class_bindings_at(source, 0)
+}
+
+#[cfg(feature = "compiler")]
+fn extract_class_bindings_at(
+    source: &str,
+    id_offset: usize,
+) -> Result<(String, HashMap<usize, String>), String> {
     let mut html = String::with_capacity(source.len());
     let mut bindings = HashMap::new();
     let mut remaining = source;
@@ -171,7 +734,7 @@ fn extract_class_bindings(source: &str) -> Result<(String, HashMap<usize, String
         if tag.starts_with("</") || tag.starts_with("<!") || tag.starts_with("<?") {
             html.push_str(tag);
         } else {
-            html.push_str(&replace_class_bindings(tag, &mut bindings)?);
+            html.push_str(&replace_class_bindings(tag, &mut bindings, id_offset)?);
         }
         remaining = &remaining[end..];
     }
@@ -210,6 +773,7 @@ fn html_tag_end(tag: &str) -> Result<usize, String> {
 fn replace_class_bindings(
     tag: &str,
     bindings: &mut HashMap<usize, String>,
+    id_offset: usize,
 ) -> Result<String, String> {
     let mut result = String::with_capacity(tag.len());
     let bytes = tag.as_bytes();
@@ -274,7 +838,7 @@ fn replace_class_bindings(
         if expression.is_empty() {
             return Err("class={...} needs a Rust style expression".into());
         }
-        let id = bindings.len();
+        let id = id_offset + bindings.len();
         bindings.insert(id, expression.to_owned());
         result.push_str(&tag[copied..cursor]);
         result.push_str(&format!(" data-rsc-class-binding=\"{id}\""));
@@ -703,25 +1267,26 @@ fn element_code(
         render_body.push_str(&format!("    container = container{calls};\n"));
     }
     let content = match element.value().name() {
-        "output" => "view.render_output(element, container)".to_owned(),
-        "input" => "{ let control_style = container.style().clone(); view.render_slider(element, container, control_style) }".to_owned(),
-        "select" => "view.render_select(element, container)".to_owned(),
-        "button" if element.value().attr("data-out").is_some() => {
-            "{ let control_style = container.style().clone(); view.render_button(element, container, control_style, cx) }".to_owned()
-        }
-        "option" => "container.into_any_element()".to_owned(),
-        _ => {
-            let mut body = String::new();
-            for render in child_renders {
-                body.push_str(&render);
+        "rsc-if" => "view.render_if(element, container, viewport_width, cx)".to_owned(),
+            "output" | "rsc-value" => "view.render_output(element, container)".to_owned(),
+            "input" => "{ let control_style = container.style().clone(); view.render_slider(element, container, control_style) }".to_owned(),
+            "select" => "view.render_select(element, container)".to_owned(),
+            "button" if element.value().attr("data-out").is_some() => {
+                "{ let control_style = container.style().clone(); view.render_button(element, container, control_style, cx) }".to_owned()
             }
-            if let Some(name) = &animation_fn {
-                body.push_str(&format!("    {name}(container)"));
-            } else {
-                body.push_str("    container.into_any_element()");
+            "option" => "container.into_any_element()".to_owned(),
+            _ => {
+                let mut body = String::new();
+                for render in child_renders {
+                    body.push_str(&render);
+                }
+                if let Some(name) = &animation_fn {
+                    body.push_str(&format!("    {name}(container)"));
+                } else {
+                    body.push_str("    container.into_any_element()");
+                }
+                body
             }
-            body
-        }
     };
     render_body.push_str(&content);
     gpui_functions.push(format!(

@@ -3,7 +3,7 @@ use gpui_rsc::{in_binding, in_out_binding, out_binding};
 use gpui_rsc::runtime::{Value, Snapshot};
 use std::collections::HashMap;
 
-use gpui_rsc::{component, runtime::{Definition, InlineStyle as Style, Length, StyleContext}};
+use gpui_rsc::{component, runtime::{Definition, InlineStyle as Style, StyleContext}};
 use crate::generated::{coffee_profile, coffee_variables_form, extraction_previews};
 
 pub fn definition() -> Definition {
@@ -337,7 +337,7 @@ pub fn adjust_recipe_to_target(recipe: &mut HashMap<String, Value>, changed_key:
     <div class="cards">
       <component class="mobile-card controls-form" class={styles.mobile_card} name="coffee-variables-form" method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
       <component class="mobile-card profile-form" class={styles.mobile_card} name="coffee-profile" acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
-      <component class="extraction-gallery" name="extraction-previews" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" />
+      <component class="extraction-gallery" name="extraction-previews" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" method="[method]" />
     </div>
   </main>
 </body>

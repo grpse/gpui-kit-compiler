@@ -7,6 +7,29 @@ use std::collections::HashMap;
 pub type Style = gpui::StyleRefinement;
 pub type OutputFormatter = fn(&str, &Value) -> String;
 
+/// A selectable value and the label shown in the select menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectOption {
+    pub value: String,
+    pub label: String,
+    pub selected: bool,
+}
+
+impl SelectOption {
+    pub fn new(value: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            label: label.into(),
+            selected: false,
+        }
+    }
+
+    pub fn selected(mut self) -> Self {
+        self.selected = true;
+        self
+    }
+}
+
 pub struct StyleContext<'a> {
     pub viewport_width: f32,
     pub snapshot: &'a Snapshot,
@@ -24,6 +47,7 @@ pub struct Definition {
     /// Viewport widths at or below this value use `mobile-style` declarations.
     pub mobile_breakpoint: Option<f32>,
     pub output_formatter: Option<OutputFormatter>,
+    pub select_options: HashMap<String, Vec<SelectOption>>,
 }
 
 impl Definition {
@@ -41,6 +65,23 @@ impl Definition {
         self.output_formatter = Some(formatter);
         self
     }
+
+    /// Use a template expression assembled in the component script.
+    pub fn with_template(mut self, template: TemplateElement) -> Self {
+        self.template = template;
+        self
+    }
+
+    /// Provide select choices from a Rust iterator, mapping values to visible labels.
+    pub fn with_select_options(
+        mut self,
+        id: impl Into<String>,
+        options: impl IntoIterator<Item = SelectOption>,
+    ) -> Self {
+        self.select_options
+            .insert(id.into(), options.into_iter().collect());
+        self
+    }
 }
 
 #[macro_export]
@@ -56,6 +97,7 @@ macro_rules! component {
             on_change: Some($on_change),
             mobile_breakpoint: None,
             output_formatter: None,
+            select_options: std::collections::HashMap::new(),
         }
     };
     (name: $name:literal, imports: [$($import:expr),* $(,)?], bindings: [$($binding:expr),* $(,)?], calculate: $calculate:expr $(,)?) => {
@@ -69,6 +111,7 @@ macro_rules! component {
             on_change: None,
             mobile_breakpoint: None,
             output_formatter: None,
+            select_options: std::collections::HashMap::new(),
         }
     };
     (name: $name:literal, imports: [$($import:expr),* $(,)?], bindings: [$($binding:expr),* $(,)?] $(,)?) => {
@@ -82,6 +125,7 @@ macro_rules! component {
             on_change: None,
             mobile_breakpoint: None,
             output_formatter: None,
+            select_options: std::collections::HashMap::new(),
         }
     };
 }
