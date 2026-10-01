@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 pub type Style = InlineStyle;
 pub type StyleSheet = for<'a> fn(&StyleContext<'a>) -> Vec<StyleRule>;
+pub type OutputFormatter = fn(&str, &Value) -> String;
 
 pub struct StyleContext<'a> {
     pub viewport_width: f32,
@@ -38,7 +39,9 @@ pub struct Definition {
     pub on_change: Option<fn(&mut HashMap<String, Value>, &str, &Value)>,
     /// Viewport widths at or below this value use `mobile-style` declarations.
     pub mobile_breakpoint: Option<f32>,
-    pub style_sheet: Option<StyleSheet>,
+    pub style_sheets: Vec<StyleSheet>,
+    pub responsive_style_sheets: Vec<StyleSheet>,
+    pub output_formatter: Option<OutputFormatter>,
 }
 
 impl Definition {
@@ -54,7 +57,18 @@ impl Definition {
 
     /// Add Rust-defined styles that are recomputed from the current viewport and app state.
     pub fn with_style_sheet(mut self, style_sheet: StyleSheet) -> Self {
-        self.style_sheet = Some(style_sheet);
+        self.style_sheets.push(style_sheet);
+        self
+    }
+
+    /// Add compiler-generated style rules evaluated against the current viewport.
+    pub fn with_responsive_style_sheet(mut self, style_sheet: StyleSheet) -> Self {
+        self.responsive_style_sheets.push(style_sheet);
+        self
+    }
+
+    pub fn with_output_formatter(mut self, formatter: OutputFormatter) -> Self {
+        self.output_formatter = Some(formatter);
         self
     }
 }
@@ -71,7 +85,9 @@ macro_rules! component {
             calculate: Some($calculate),
             on_change: Some($on_change),
             mobile_breakpoint: None,
-            style_sheet: None,
+            style_sheets: Vec::new(),
+            responsive_style_sheets: Vec::new(),
+            output_formatter: None,
         }
     };
     (name: $name:literal, imports: [$($import:expr),* $(,)?], bindings: [$($binding:expr),* $(,)?], calculate: $calculate:expr $(,)?) => {
@@ -84,7 +100,9 @@ macro_rules! component {
             calculate: Some($calculate),
             on_change: None,
             mobile_breakpoint: None,
-            style_sheet: None,
+            style_sheets: Vec::new(),
+            responsive_style_sheets: Vec::new(),
+            output_formatter: None,
         }
     };
     (name: $name:literal, imports: [$($import:expr),* $(,)?], bindings: [$($binding:expr),* $(,)?] $(,)?) => {
@@ -97,7 +115,9 @@ macro_rules! component {
             calculate: None,
             on_change: None,
             mobile_breakpoint: None,
-            style_sheet: None,
+            style_sheets: Vec::new(),
+            responsive_style_sheets: Vec::new(),
+            output_formatter: None,
         }
     };
 }

@@ -1,25 +1,24 @@
 # GPUI RSC and Coffee / Lab
 
-`gpui-rsc` compiles single-file Rust components into a GPUI Kit desktop app. The coffee example is exactly three source files in [`examples/coffee`](examples/coffee): `app.rsc`, `coffee-variables-form.rsc`, and `coffee-profile.rsc`. Its recipe calculations live in the `<script>` section of `app.rsc`.
+`gpui-rsc` compiles single-file Rust components into a GPUI Kit desktop app. The coffee example consists of four `.rsc` files in [`examples/coffee`](examples/coffee). Its recipe calculations and output formatting live in the `<script>` section of `app.rsc`; its preview is HTML in `brew-visualization.rsc`.
 
 ## Build and run
 
 ```sh
-cargo run                         # build and launch the coffee example
-cargo run -p gpui-rsc -- compile   # generate the app under target/rsc-build/coffee
-cargo run -p gpui-rsc -- build     # generate, Cargo build, and validate bindings
-cargo run -p gpui-rsc -- run       # build and launch
-cargo run -p gpui-rsc -- dev       # watch .rsc and compiler sources, rebuild, relaunch
-cargo run --features debug-fps     # launch with a small FPS overlay
+cargo run -- compile examples/coffee     # generate the app under target/rsc-build/coffee
+cargo run -- build examples/coffee       # generate, Cargo build, and validate bindings
+cargo run -- run examples/coffee         # build and launch
+cargo run -- dev examples/coffee         # watch sources, rebuild, relaunch
+cargo run --features debug-fps -- run examples/coffee
 ```
 
-The optional second CLI argument is another example directory. It must contain `app.rsc`, which is the root component, and may contain any number of child `.rsc` files. The CLI generates the Cargo manifest, `main.rs`, module glue, and `*.inter.rs` files under `target/rsc-build/<example-name>/`. No handwritten Rust crate is needed in the example directory.
+The component directory argument is required and may point anywhere on the filesystem. It must contain `app.rsc`, the root component, and may contain child `.rsc` files. The CLI generates the Cargo manifest, `main.rs`, module glue, and `*.inter.rs` files under `target/rsc-build/<directory-name>/`. The generated app has exactly two direct dependencies: `gpui` and `gpui-kit`. The compiler depends on `scraper` and emits GPUI code without linking GPUI itself.
 
 On Linux, GPUI needs Wayland or X11 plus its native graphics and windowing libraries; see the [GPUI Kit installation guide](https://gpui-kit.com/docs/installation/).
 
 ## Component format
 
-Each `.rsc` starts with a `<script>` block containing ordinary Rust code, followed by HTML with inline styles. The closing `</script>` goes on its own line. Rust in the script is copied into the generated `.inter.rs` file and compiled by `rustc`.
+Each `.rsc` starts with a `<script>` block containing ordinary Rust code, followed by HTML and an optional component-local `<style>` block. The closing `</script>` goes on its own line. Rust in the script is copied into the generated `.inter.rs` file and compiled by `rustc`.
 
 ```html
 <script>
@@ -42,21 +41,27 @@ pub fn definition() -> Definition {
 </body></html>
 ```
 
-A component script declares `definition() -> Definition`. The root `app.rsc` supplies a `calculate` callback, which the generic library runs on a worker thread when values change. It can also supply an `on_change` callback to adjust inputs before recalculation. Other Rust functions, types, methods, and imports can live in any component script. The [coffee calculation and recipe solver](examples/coffee/app.rsc) are examples.
+A component script declares `definition() -> Definition`. The root `app.rsc` supplies a `calculate` callback, which the generated app runs on a worker thread when values change. It can also supply an `on_change` callback to adjust inputs before recalculation. Other Rust functions, types, methods, and imports can live in any component script. The [coffee calculation and recipe solver](examples/coffee/app.rsc) are examples.
 
 A parent imports a child in its script and instantiates it with `<component name="coffee-profile" acidity="[acidity]" ... />`. `data-in` means UI read-only, `data-out` invokes or writes to Rust, and `data-in-out` is two-way. `in_param!`, `out_param!`, and `in_out_param!` declare a child component's public parameters. Root bindings can point to application keys or Rust getter and setter closures. The compiler's build command validates names, parameters, and binding directions before launch.
 
-The generated `.inter.rs` files define component structs with `definition()` and `template()` methods. HTML is compiled into Rust constructors for an element tree, so the running app does not parse HTML. The library's GPUI Kit renderer interprets that tree and supported CSS. Component-local `<style>` blocks support ordinary selectors and `@media (max-width: ...px)` rules over the same CSS subset: flex layout, spacing, colors, fonts, borders, dimensions, alignment, and scrolling. Inline `style` declarations take precedence over matching stylesheet rules. Responsive rules are evaluated against the live GPUI viewport, so resizing the desktop window previews the narrow layout.
+The compiler uses `scraper` to read the HTML and match CSS selectors. The generated `.inter.rs` files define component structs and GPUI render functions. Each matched CSS declaration becomes a GPUI builder call in its element's render function, including conditional calls for `@media (max-width: ...px)`. Ordinary child elements and text are composed directly in those generated functions. The app does not parse HTML or CSS. Component-local `<style>` blocks support flex layout, spacing, colors, fonts, borders, dimensions, positioning, alignment, and scrolling. `@keyframes` with `from` and `to` stops can animate `top`, `bottom`, and `opacity` through `animation: name 1200ms infinite`. Inline `style` declarations take precedence over stylesheet and dynamic rules. Responsive GPUI styles receive the live viewport width, so resizing the desktop window previews the narrow layout.
 
-Rust can add styles that depend on app state or viewport width with `Definition::with_style_sheet`. A style resolver receives `StyleContext { viewport_width, snapshot }` and returns `StyleRule::new(".card", InlineStyle::new().gap(16.0).max_width(560.0))` values. These rules are recomputed when the app state or viewport changes and can set one or several supported style properties. Dynamic selectors currently target a tag, class, or id.
+The [coffee visualization](examples/coffee/brew-visualization.rsc) is a child component: its scene is HTML and CSS, and its script computes state-dependent style values. A component script can provide an output formatter with `Definition::with_output_formatter`; without one, outputs use `Value::text()`.
 
-The seven flavor sliders show the predicted scores, use the matching output color, and can also be dragged. Moving one runs the solver in `app.rsc`, which searches recipe quantities and brewing choices for a closer score. The recipe controls, flavor sliders, and coffee preview then reflect the new prediction. The preview animates the pour and steam, while coffee tint and cup fill respond to recipe values. Some scores cannot be reached exactly. Calculation changes are sent from the worker as events; only changed controls, outputs, and the preview receive GPUI notifications. The optional `debug-fps` build feature adds a small FPS overlay and requests continuous frames while measuring. The desktop window uses a GPUI Kit title bar with standard minimize, maximize, and close controls.
+Rust can add styles that depend on app state or viewport width with `Definition::with_style_sheet`. A style resolver receives `StyleContext { viewport_width, snapshot }` and returns `StyleRule::new(".card", InlineStyle::new().gap(16.0).max_width(560.0))` values. Each `InlineStyle` builder call binds its property value to a GPUI operation when the rule is created; the app applies those operations when the state or viewport changes. Dynamic selectors currently target a tag, class, or id.
+
+For a style owned by one element, use a Rust style binding in the HTML: `class={styles.cup_fill}`. The component script defines `fn styles(context: &StyleContext<'_>) -> Styles`, where `Styles` has a `cup_fill: Style` field. The compiler applies that field directly to the element after its static CSS classes. The binding is recomputed when the viewport or snapshot changes. A direct Rust expression also works, such as `class={Style::new().background_color(color_for(context))}`. The generated render function provides `context: &StyleContext<'_>`; `Style` is the `InlineStyle` alias. Static `class="..."` and a bound `class={...}` may appear on the same element. The [brew visualization](examples/coffee/brew-visualization.rsc) uses this pattern for coffee, filter, kettle, and cup colors.
+
+The seven flavor sliders show the predicted scores and can also be dragged. Moving one runs the solver in `app.rsc`, which searches recipe quantities and brewing choices for a closer score. The recipe controls, flavor sliders, and coffee preview then reflect the new prediction. The HTML preview animates droplets and steam; coffee tint, filter and kettle colors, and cup fill respond to recipe values. Some scores cannot be reached exactly. Calculation changes are sent from the worker as events and update the GPUI view. The optional `debug-fps` build feature adds a small FPS overlay and requests continuous frames while measuring. The desktop window uses a GPUI Kit title bar with standard minimize, maximize, and close controls.
 
 ## Library layout
 
-- [`src/lib.rs`](src/lib.rs): `.rsc` compiler and generated template types.
+- [`src/lib.rs`](src/lib.rs): `.rsc` parser and GPUI code generator.
+- [`src/template.rs`](src/template.rs): generated template types.
 - [`src/main.rs`](src/main.rs): compiler CLI and development watcher.
-- [`src/runtime`](src/runtime): GPUI Kit renderer, scoped bindings, and generic worker state.
+- [`src/runtime`](src/runtime): GPUI Kit controls, scoped bindings, and worker state copied into generated apps.
 - [`examples/coffee/app.rsc`](examples/coffee/app.rsc): coffee recipe bindings and heuristic sensory calculations.
+- [`examples/coffee/brew-visualization.rsc`](examples/coffee/brew-visualization.rsc): coffee preview HTML and dynamic style bindings.
 
 The coffee scores are relative recipe estimates; coffee origin, roast, water chemistry, and tasting feedback are not modeled.

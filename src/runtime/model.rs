@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        mpsc::{self, Sender},
+        mpsc::{self, Receiver, Sender},
     },
     thread,
 };
@@ -218,13 +218,14 @@ impl Snapshot {
 enum Message {
     Set(String, Value),
     Invoke(String),
+    Reset,
 }
 
 #[derive(Clone)]
 pub struct Engine {
     sender: Sender<Message>,
     shared: Arc<Mutex<Snapshot>>,
-    updates: async_channel::Receiver<Snapshot>,
+    updates: Arc<Mutex<Receiver<Snapshot>>>,
 }
 
 impl Engine {
@@ -235,37 +236,41 @@ impl Engine {
     ) -> Self {
         let shared = Arc::new(Mutex::new(calculate(&defaults, 0)));
         let (sender, receiver) = mpsc::channel();
-        let (updates_tx, updates) = async_channel::unbounded();
+        let (updates_tx, updates) = mpsc::channel();
         let shared_worker = Arc::clone(&shared);
         thread::Builder::new()
             .name("rsc-calculation-worker".into())
             .spawn(move || {
-                let mut recipe = defaults.clone();
+                let mut values = defaults.clone();
                 let mut reset_epoch = 0;
                 while let Ok(message) = receiver.recv() {
                     match message {
                         Message::Set(key, value) => {
-                            recipe.insert(key.clone(), value.clone());
+                            values.insert(key.clone(), value.clone());
                             if let Some(on_change) = on_change {
-                                on_change(&mut recipe, &key, &value);
+                                on_change(&mut values, &key, &value);
                             }
                         }
-                        Message::Invoke(key) if key == "command.reset" || key == "reset" => {
-                            recipe = defaults.clone();
+                        Message::Invoke(key) => {
+                            if let Some(on_change) = on_change {
+                                on_change(&mut values, &key, &Value::Arguments(Vec::new()));
+                            }
+                        }
+                        Message::Reset => {
+                            values = defaults.clone();
                             reset_epoch += 1;
                         }
-                        Message::Invoke(_) => {}
                     }
-                    let next = calculate(&recipe, reset_epoch);
+                    let next = calculate(&values, reset_epoch);
                     *shared_worker.lock().expect("snapshot lock poisoned") = next.clone();
-                    let _ = updates_tx.try_send(next);
+                    let _ = updates_tx.send(next);
                 }
             })
             .expect("failed to start calculation worker");
         Self {
             sender,
             shared,
-            updates,
+            updates: Arc::new(Mutex::new(updates)),
         }
     }
     pub fn set(&self, key: impl Into<String>, value: Value) {
@@ -274,8 +279,11 @@ impl Engine {
     pub fn invoke(&self, key: impl Into<String>) {
         let _ = self.sender.send(Message::Invoke(key.into()));
     }
-    pub fn subscribe(&self) -> async_channel::Receiver<Snapshot> {
-        self.updates.clone()
+    pub fn reset(&self) {
+        let _ = self.sender.send(Message::Reset);
+    }
+    pub fn subscribe(&self) -> Arc<Mutex<Receiver<Snapshot>>> {
+        Arc::clone(&self.updates)
     }
     pub fn snapshot(&self) -> Snapshot {
         self.shared.lock().expect("snapshot lock poisoned").clone()

@@ -3,13 +3,13 @@ use gpui_rsc::{in_binding, in_out_binding, out_binding};
 use gpui_rsc::runtime::{Value, Snapshot};
 use std::collections::HashMap;
 
-use gpui_rsc::{component, runtime::{Definition, InlineStyle as Style, Length, StyleContext, StyleRule}};
-use crate::generated::{coffee_profile, coffee_variables_form};
+use gpui_rsc::{component, runtime::{Definition, InlineStyle as Style, Length, StyleContext}};
+use crate::generated::{brew_visualization, coffee_profile, coffee_variables_form};
 
 pub fn definition() -> Definition {
     component! {
         name: "app",
-        imports: [coffee_variables_form::CoffeeVariablesFormComponent::definition(), coffee_profile::CoffeeProfileComponent::definition()],
+        imports: [coffee_variables_form::CoffeeVariablesFormComponent::definition(), coffee_profile::CoffeeProfileComponent::definition(), brew_visualization::BrewVisualizationComponent::definition()],
         bindings: [
             in_out_binding!("method" => "recipe.method"),
             in_out_binding!("dose" => "recipe.dose"),
@@ -21,7 +21,7 @@ pub fn definition() -> Definition {
             in_out_binding!("stirs" => "recipe.stirs"),
             in_out_binding!("swirls" => "recipe.swirls"),
             in_out_binding!("filter" => "recipe.filter"),
-            out_binding!("reset" => "command.reset"),
+            out_binding!("reset", |engine, _| engine.reset()),
             in_out_binding!("acidity", data_key = None,
                 get = |snapshot: &Snapshot| snapshot.get("profile.acidity").cloned(),
                 set = |engine: &gpui_rsc::runtime::Engine, value: Value| engine.set("target.acidity", value)),
@@ -47,25 +47,44 @@ pub fn definition() -> Definition {
 
             in_binding!("ratio", |snapshot: &Snapshot| snapshot.get("derived.ratio").cloned()),
             in_binding!("extraction_signal" => "derived.extraction_signal"),
+            in_binding!("character" => "preview.character"),
         ],
         calculate: calculate,
         on_change: adjust_recipe_to_target,
     }
-    .with_style_sheet(dynamic_styles)
+    .with_output_formatter(output_format)
 }
 
-pub fn dynamic_styles(context: &StyleContext<'_>) -> Vec<StyleRule> {
-    if context.viewport_width > 768.0 {
-        return Vec::new();
+pub fn output_format(name: &str, value: &Value) -> String {
+    match name {
+        "score" => format!("{:.0}", value.number().unwrap_or(0.0)),
+        "ratio" => format!("1 : {:.1}", value.number().unwrap_or(0.0)),
+        "duration" => {
+            let seconds = value.number().unwrap_or(0.0).round() as u32;
+            format!("{}:{:02} min", seconds / 60, seconds % 60)
+        }
+        _ => value.text(),
     }
-    let card_width = (context.viewport_width - 28.0).max(0.0).min(560.0);
-    vec![StyleRule::new(
-        ".mobile-card",
+}
+
+pub struct AppStyles {
+    pub mobile_card: Style,
+}
+
+fn mobile_card_style(context: &StyleContext<'_>) -> Style {
+    if context.viewport_width <= 768.0 {
+        let card_width = (context.viewport_width - 28.0).max(0.0).min(560.0);
         Style::new()
             .width(Length::Percent(1.0))
             .min_width(0.0)
-            .max_width(card_width),
-    )]
+            .max_width(card_width)
+    } else {
+        Style::new()
+    }
+}
+
+pub fn styles(context: &StyleContext<'_>) -> AppStyles {
+    AppStyles { mobile_card: mobile_card_style(context) }
 }
 
 fn number(recipe: &HashMap<String, Value>, key: &str, fallback: f32) -> f32 {
@@ -180,6 +199,16 @@ pub fn calculate(recipe: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot 
         values.insert(key.into(), Value::Number(value));
     }
     values.insert("profile.notes".into(), Value::Text(notes.join("  •  ")));
+    let character = if intensity > 69.0 || bitterness > 62.0 {
+        "Bold & roasty"
+    } else if clarity > 70.0 && acidity > 58.0 {
+        "Bright & tea-like"
+    } else if body > 66.0 {
+        "Silky & full"
+    } else {
+        "Soft & balanced"
+    };
+    values.insert("preview.character".into(), Value::Text(character.into()));
     values.insert(
         "derived.extraction_signal".into(),
         Value::Text(
@@ -283,23 +312,32 @@ pub fn adjust_recipe_to_target(recipe: &mut HashMap<String, Value>, changed_key:
       .cards { flex-direction:column; flex-wrap:nowrap; align-items:center; gap:16px; width:100%; min-width:0; }
       .mobile-card { width:100%; max-width:560px; min-width:0; }
     }
+    .page { background:#17130f; color:#f4ece1; overflow-y:auto; }
+    .page-content { width:100%; max-width:1200px; margin:auto; padding:28px; display:flex; flex-direction:column; gap:24px; }
+    .page-header { display:flex; justify-content:space-between; align-items:center; gap:20px; }
+    .brand-heading { display:flex; flex-direction:column; gap:5px; }
+    .eyebrow { font-size:10px; font-weight:600; color:#d99b59; }
+    .page-title { font-size:28px; font-weight:700; color:#f8f1e8; }
+    .page-subtitle { font-size:13px; color:#a99b8d; }
+    .build-badge { background:#2b2118; border:1px solid #4b3928; border-radius:99px; padding:8px 12px; color:#e0ad71; font-size:10px; font-weight:600; }
+    .cards { display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; }
   </style>
 </head>
-<body style="background:#17130f; color:#f4ece1; overflow-y:auto">
-  <main style="width:100%; max-width:1200px; margin:auto; padding:28px; display:flex; flex-direction:column; gap:24px">
-    <header style="display:flex; justify-content:space-between; align-items:center; gap:20px">
-      <div style="display:flex; flex-direction:column; gap:5px">
-        <p style="font-size:10px; font-weight:600; color:#d99b59">BREW RECIPE STUDIO</p>
-        <h1 style="font-size:28px; font-weight:700; color:#f8f1e8">Coffee / Lab</h1>
-        <p style="font-size:13px; color:#a99b8d">Describe the brew you made. See how each choice shifts the cup.</p>
+<body class="page">
+  <main class="page-content">
+    <header class="page-header">
+      <div class="brand-heading">
+        <p class="eyebrow">BREW RECIPE STUDIO</p>
+        <h1 class="page-title">Coffee / Lab</h1>
+        <p class="page-subtitle">Describe the brew you made. See how each choice shifts the cup.</p>
       </div>
-      <div style="background:#2b2118; border:1px solid #4b3928; border-radius:99px; padding:8px 12px; color:#e0ad71; font-size:10px; font-weight:600">●  RECIPE ESTIMATE</div>
+      <div class="build-badge">●  RECIPE ESTIMATE</div>
     </header>
 
-    <div class="cards" style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap">
-      <component class="mobile-card controls-form" name="coffee-variables-form" method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
-      <component class="mobile-card profile-form" name="coffee-profile" acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
-      <brew-visualization class="mobile-card brew-preview" style="flex:1; min-width:260px"></brew-visualization>
+    <div class="cards">
+      <component class="mobile-card controls-form" class={styles.mobile_card} name="coffee-variables-form" method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
+      <component class="mobile-card profile-form" class={styles.mobile_card} name="coffee-profile" acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
+      <component class="mobile-card brew-preview" class={mobile_card_style(context)} name="brew-visualization" method="[method]" filter="[filter]" water="[water]" pours="[pours]" acidity="[acidity]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" intensity="[intensity]" extraction_signal="[extraction_signal]" character="[character]" />
     </div>
   </main>
 </body>

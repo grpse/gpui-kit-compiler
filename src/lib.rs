@@ -1,46 +1,15 @@
 //! Compiler for single-file Rust components. `.inter.rs` files contain Rust tokens
 //! and are consumed by `include!` in a normal Cargo build.
-pub mod runtime;
+#[cfg(feature = "compiler")]
 use scraper::{ElementRef, Html, Node as HtmlNode, Selector};
+#[cfg(feature = "compiler")]
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
 
-#[derive(Clone)]
-pub enum TemplateNode {
-    Text(String),
-    Element(TemplateElement),
-}
-#[derive(Clone)]
-pub struct TemplateElement {
-    pub tag: String,
-    pub attrs: Vec<(String, String)>,
-    pub children: Vec<TemplateNode>,
-}
-impl TemplateElement {
-    pub fn new(
-        tag: impl Into<String>,
-        attrs: Vec<(String, String)>,
-        children: Vec<TemplateNode>,
-    ) -> Self {
-        Self {
-            tag: tag.into(),
-            attrs,
-            children,
-        }
-    }
-    pub fn attr(&self, key: &str) -> Option<&str> {
-        self.attrs
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-}
-pub trait CompiledComponent {
-    fn template() -> TemplateElement;
-}
-
+#[cfg(feature = "compiler")]
 pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     if input.extension().and_then(|s| s.to_str()) != Some("rsc") {
         return Err(format!("{} is not .rsc", input.display()));
@@ -69,18 +38,41 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     if html.trim().is_empty() {
         return Err(format!("{} has no HTML", input.display()));
     }
-    let html = normalize_component_tags(html);
+    let html = normalize_component_tags(html)?;
+    let (html, class_bindings) = extract_class_bindings(&html)?;
     let document = Html::parse_document(&html);
-    let stylesheet = component_styles(&document, input)?;
-    let body = document
-        .select(&Selector::parse("body").unwrap())
-        .next()
-        .ok_or("component needs <body>")?;
-    let tree = element_code(body, &stylesheet);
+    let (stylesheet, keyframes) = component_styles(&document, input)?;
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or("invalid filename")?;
+    let style_scope = stem
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let body = document
+        .select(&Selector::parse("body").unwrap())
+        .next()
+        .ok_or("component needs <body>")?;
+    let mut responsive_styles = Vec::new();
+    let mut gpui_functions = Vec::new();
+    let mut next_style_id = 0;
+    let tree = element_code(
+        body,
+        &stylesheet,
+        &keyframes,
+        &style_scope,
+        &class_bindings,
+        &mut next_style_id,
+        &mut responsive_styles,
+        &mut gpui_functions,
+    )?;
     let title = document
         .select(&Selector::parse("title").unwrap())
         .next()
@@ -100,14 +92,30 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
             .collect::<String>()
     );
     // Script is inserted verbatim. It can contain any Rust items, functions, and methods.
+    let responsive_styles = if responsive_styles.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nfn __rsc_responsive_styles(context: &gpui_rsc::runtime::StyleContext<'_>) -> Vec<gpui_rsc::runtime::StyleRule> {{\n    let mut styles = Vec::new();\n{}\n    styles\n}}\n",
+            responsive_styles.join("\n")
+        )
+    };
+    let attach_responsive_styles = if responsive_styles.is_empty() {
+        "definition()".to_owned()
+    } else {
+        "definition().with_responsive_style_sheet(__rsc_responsive_styles)".to_owned()
+    };
     let generated = format!(
-        "// Generated Rust source from {}.\n{}\n\npub struct {};\nimpl gpui_rsc::CompiledComponent for {} {{\n    fn template() -> gpui_rsc::TemplateElement {{ {} }}\n}}\nimpl {} {{\n    pub fn definition() -> gpui_rsc::runtime::Definition {{ definition() }}\n    pub fn template() -> gpui_rsc::TemplateElement {{ <Self as gpui_rsc::CompiledComponent>::template() }}\n}}\npub fn template() -> gpui_rsc::TemplateElement {{ {}::template() }}\npub fn title() -> &'static str {{ {:?} }}\n",
+        "// Generated Rust source from {}.\n{}{}\n{}\npub struct {};\nimpl gpui_rsc::CompiledComponent for {} {{\n    fn template() -> gpui_rsc::TemplateElement {{ {} }}\n}}\nimpl {} {{\n    pub fn definition() -> gpui_rsc::runtime::Definition {{ {} }}\n    pub fn template() -> gpui_rsc::TemplateElement {{ <Self as gpui_rsc::CompiledComponent>::template() }}\n}}\npub fn template() -> gpui_rsc::TemplateElement {{ {}::template() }}\npub fn title() -> &'static str {{ {:?} }}\n",
         input.display(),
         script,
+        responsive_styles,
+        gpui_functions.join("\n"),
         struct_name,
         struct_name,
         tree,
         struct_name,
+        attach_responsive_styles,
         struct_name,
         title
     );
@@ -120,6 +128,7 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "compiler")]
 pub fn compile_directory(directory: &Path, output: &Path) -> Result<Vec<PathBuf>, String> {
     let mut inputs = fs::read_dir(directory)
         .map_err(|e| e.to_string())?
@@ -142,16 +151,15 @@ pub fn compile_directory(directory: &Path, output: &Path) -> Result<Vec<PathBuf>
     }
     Ok(outputs)
 }
-fn normalize_component_tags(source: &str) -> String {
+#[cfg(feature = "compiler")]
+fn normalize_component_tags(source: &str) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = source;
     while let Some(start) = rest.find("<component ") {
         out.push_str(&rest[..start]);
         rest = &rest[start..];
-        let Some(end) = rest.find('>') else {
-            break;
-        };
-        let tag = &rest[..=end];
+        let end = html_tag_end(rest)?;
+        let tag = &rest[..end];
         if tag.trim_end_matches('>').trim_end().ends_with('/') {
             out.push_str(
                 tag.trim_end_matches('>')
@@ -163,38 +171,228 @@ fn normalize_component_tags(source: &str) -> String {
         } else {
             out.push_str(tag);
         }
-        rest = &rest[end + 1..];
+        rest = &rest[end..];
     }
     out.push_str(rest);
-    out
+    Ok(out)
 }
 
+#[cfg(feature = "compiler")]
+fn extract_class_bindings(source: &str) -> Result<(String, HashMap<usize, String>), String> {
+    let mut html = String::with_capacity(source.len());
+    let mut bindings = HashMap::new();
+    let mut remaining = source;
+    while let Some(start) = remaining.find('<') {
+        html.push_str(&remaining[..start]);
+        remaining = &remaining[start..];
+        if remaining.starts_with("<!--") {
+            let end = remaining.find("-->").ok_or("unterminated HTML comment")? + 3;
+            html.push_str(&remaining[..end]);
+            remaining = &remaining[end..];
+            continue;
+        }
+        let end = html_tag_end(remaining)?;
+        let tag = &remaining[..end];
+        if tag.starts_with("</") || tag.starts_with("<!") || tag.starts_with("<?") {
+            html.push_str(tag);
+        } else {
+            html.push_str(&replace_class_bindings(tag, &mut bindings)?);
+        }
+        remaining = &remaining[end..];
+    }
+    html.push_str(remaining);
+    Ok((html, bindings))
+}
+
+#[cfg(feature = "compiler")]
+fn html_tag_end(tag: &str) -> Result<usize, String> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut braces = 0usize;
+    for (index, character) in tag.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+        } else {
+            match character {
+                '\'' | '"' => quote = Some(character),
+                '{' => braces += 1,
+                '}' if braces > 0 => braces -= 1,
+                '>' if braces == 0 => return Ok(index + 1),
+                _ => {}
+            }
+        }
+    }
+    Err("unterminated HTML tag or Rust class expression".into())
+}
+
+#[cfg(feature = "compiler")]
+fn replace_class_bindings(
+    tag: &str,
+    bindings: &mut HashMap<usize, String>,
+) -> Result<String, String> {
+    let mut result = String::with_capacity(tag.len());
+    let bytes = tag.as_bytes();
+    let mut cursor = 0;
+    let mut copied = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut found = false;
+    while cursor < bytes.len() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if bytes[cursor] == b'\\' {
+                escaped = true;
+            } else if bytes[cursor] == delimiter {
+                quote = None;
+            }
+            cursor += 1;
+            continue;
+        }
+        if bytes[cursor] == b'\'' || bytes[cursor] == b'"' {
+            quote = Some(bytes[cursor]);
+            cursor += 1;
+            continue;
+        }
+        if !bytes[cursor..].starts_with(b"class")
+            || cursor == 0
+            || !bytes[cursor - 1].is_ascii_whitespace()
+        {
+            cursor += 1;
+            continue;
+        }
+        let mut value_start = cursor + 5;
+        while tag
+            .as_bytes()
+            .get(value_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            value_start += 1;
+        }
+        if tag.as_bytes().get(value_start) != Some(&b'=') {
+            cursor += 5;
+            continue;
+        }
+        value_start += 1;
+        while tag
+            .as_bytes()
+            .get(value_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            value_start += 1;
+        }
+        if tag.as_bytes().get(value_start) != Some(&b'{') {
+            cursor += 5;
+            continue;
+        }
+        if found {
+            return Err("an element may have only one class={...} binding".into());
+        }
+        let close = rust_brace_end(tag, value_start)?;
+        let expression = tag[value_start + 1..close].trim();
+        if expression.is_empty() {
+            return Err("class={...} needs a Rust style expression".into());
+        }
+        let id = bindings.len();
+        bindings.insert(id, expression.to_owned());
+        result.push_str(&tag[copied..cursor]);
+        result.push_str(&format!(" data-rsc-class-binding=\"{id}\""));
+        cursor = close + 1;
+        copied = cursor;
+        found = true;
+    }
+    result.push_str(&tag[copied..]);
+    Ok(result)
+}
+
+#[cfg(feature = "compiler")]
+fn rust_brace_end(source: &str, open: usize) -> Result<usize, String> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (relative, character) in source[open..].char_indices() {
+        let index = open + relative;
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("unclosed class={...} expression".into())
+}
+
+#[cfg(feature = "compiler")]
 #[derive(Clone)]
 struct CssRule {
     selector: Selector,
     max_width: Option<f32>,
+    style: String,
     declarations: String,
 }
 
-fn component_styles(document: &Html, input: &Path) -> Result<Vec<CssRule>, String> {
+#[cfg(feature = "compiler")]
+#[derive(Clone, Copy, Default)]
+struct AnimationFrame {
+    top: Option<f32>,
+    bottom: Option<f32>,
+    opacity: Option<f32>,
+}
+
+#[cfg(feature = "compiler")]
+#[derive(Clone, Copy)]
+struct Keyframes {
+    from: AnimationFrame,
+    to: AnimationFrame,
+}
+
+#[cfg(feature = "compiler")]
+fn component_styles(
+    document: &Html,
+    input: &Path,
+) -> Result<(Vec<CssRule>, HashMap<String, Keyframes>), String> {
     let style_selector = Selector::parse("style").expect("static style selector is valid");
     let mut rules = Vec::new();
+    let mut keyframes = HashMap::new();
     for style in document.select(&style_selector) {
         let source = style.text().collect::<String>();
-        parse_stylesheet(&source, None, &mut rules).map_err(|error| {
+        parse_stylesheet(&source, None, &mut rules, &mut keyframes).map_err(|error| {
             format!(
                 "{} has an invalid component stylesheet: {error}",
                 input.display()
             )
         })?;
     }
-    Ok(rules)
+    Ok((rules, keyframes))
 }
 
+#[cfg(feature = "compiler")]
 fn parse_stylesheet(
     source: &str,
     inherited_max_width: Option<f32>,
     rules: &mut Vec<CssRule>,
+    keyframes: &mut HashMap<String, Keyframes>,
 ) -> Result<(), String> {
     let source = strip_css_comments(source)?;
     let mut remaining = source.as_str();
@@ -218,13 +416,20 @@ fn parse_stylesheet(
             let max_width = inherited_max_width
                 .map(|parent| parent.min(media_width))
                 .unwrap_or(media_width);
-            parse_stylesheet(body, Some(max_width), rules)?;
+            parse_stylesheet(body, Some(max_width), rules, keyframes)?;
+        } else if let Some(name) = header.strip_prefix("@keyframes") {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("@keyframes needs a name".into());
+            }
+            keyframes.insert(name.to_owned(), parse_keyframes(body)?);
         } else if !header.starts_with('@') {
             let selector = Selector::parse(header)
                 .map_err(|error| format!("invalid selector {header:?}: {error:?}"))?;
             rules.push(CssRule {
                 selector,
                 max_width: inherited_max_width,
+                style: style_expression(body)?,
                 declarations: body.trim().to_owned(),
             });
         }
@@ -233,6 +438,76 @@ fn parse_stylesheet(
     Ok(())
 }
 
+#[cfg(feature = "compiler")]
+fn parse_keyframes(source: &str) -> Result<Keyframes, String> {
+    let mut remaining = source;
+    let mut from = None;
+    let mut to = None;
+    loop {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            break;
+        }
+        let open = remaining
+            .find('{')
+            .ok_or("keyframe needs a declaration block")?;
+        let selector = remaining[..open].trim();
+        let close = matching_brace(remaining, open).ok_or("unclosed keyframe block")?;
+        let frame = parse_animation_frame(&remaining[open + 1..close])?;
+        match selector {
+            "from" | "0%" => from = Some(frame),
+            "to" | "100%" => to = Some(frame),
+            _ => return Err(format!("unsupported keyframe stop {selector:?}")),
+        }
+        remaining = &remaining[close + 1..];
+    }
+    Ok(Keyframes {
+        from: from.ok_or("@keyframes needs a from block")?,
+        to: to.ok_or("@keyframes needs a to block")?,
+    })
+}
+
+#[cfg(feature = "compiler")]
+fn parse_animation_frame(source: &str) -> Result<AnimationFrame, String> {
+    let mut frame = AnimationFrame::default();
+    for declaration in source
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (name, value) = declaration
+            .split_once(':')
+            .ok_or_else(|| format!("invalid keyframe declaration {declaration:?}"))?;
+        let value = value.trim();
+        match name.trim() {
+            "top" => {
+                frame.top = Some(
+                    css_number(value)?
+                        .parse()
+                        .map_err(|_| "invalid top keyframe")?,
+                )
+            }
+            "bottom" => {
+                frame.bottom = Some(
+                    css_number(value)?
+                        .parse()
+                        .map_err(|_| "invalid bottom keyframe")?,
+                )
+            }
+            "opacity" => {
+                frame.opacity = Some(
+                    css_opacity(value)?
+                        .parse()
+                        .map_err(|_| "invalid opacity keyframe")?,
+                )
+            }
+            name => return Err(format!("unsupported keyframe property {name:?}")),
+        }
+    }
+    Ok(frame)
+}
+
+#[cfg(feature = "compiler")]
 fn strip_css_comments(source: &str) -> Result<String, String> {
     let mut result = String::with_capacity(source.len());
     let mut remaining = source;
@@ -249,6 +524,7 @@ fn strip_css_comments(source: &str) -> Result<String, String> {
     Ok(result)
 }
 
+#[cfg(feature = "compiler")]
 fn matching_brace(source: &str, open: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (index, character) in source[open..].char_indices() {
@@ -266,6 +542,7 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
     None
 }
 
+#[cfg(feature = "compiler")]
 fn parse_media_max_width(condition: &str) -> Result<f32, String> {
     let (_, value) = condition
         .split_once("max-width")
@@ -293,69 +570,608 @@ fn parse_media_max_width(condition: &str) -> Result<f32, String> {
     Ok(number)
 }
 
-fn element_code(element: ElementRef<'_>, stylesheet: &[CssRule]) -> String {
+#[cfg(feature = "compiler")]
+fn element_code(
+    element: ElementRef<'_>,
+    stylesheet: &[CssRule],
+    keyframes: &HashMap<String, Keyframes>,
+    scope: &str,
+    class_bindings: &HashMap<usize, String>,
+    next_style_id: &mut usize,
+    responsive_styles: &mut Vec<String>,
+    gpui_functions: &mut Vec<String>,
+) -> Result<String, String> {
+    let style_id = *next_style_id;
+    *next_style_id += 1;
+    let kit_control = element.value().name() == "input"
+        || (element.value().name() == "button" && element.value().attr("data-out").is_some());
+    let responsive_matches = stylesheet
+        .iter()
+        .filter(|rule| rule.max_width.is_some() && rule.selector.matches(&element))
+        .collect::<Vec<_>>();
+    let style_class = if responsive_matches.is_empty() || !kit_control {
+        None
+    } else {
+        let class = format!("__rsc_{scope}_{style_id:04}");
+        for rule in &responsive_matches {
+            let max_width = rule.max_width.unwrap();
+            responsive_styles.push(format!(
+                "    if context.viewport_width <= {max_width:?} {{ styles.push(gpui_rsc::runtime::StyleRule::new({:?}, {})); }}",
+                format!(".{class}"),
+                rule.style
+            ));
+        }
+        Some(class)
+    };
+
     let mut attrs = element
         .value()
         .attrs()
-        .filter(|(key, _)| *key != "style")
-        .map(|(k, v)| format!("({:?}.into(), {:?}.into())", k, v))
+        .filter(|(key, _)| {
+            *key != "style" && *key != "mobile-style" && *key != "data-rsc-class-binding"
+        })
+        .map(|(k, v)| {
+            let value = if k == "class" {
+                style_class
+                    .as_ref()
+                    .map_or_else(|| v.to_string(), |class| format!("{} {class}", v.trim()))
+            } else {
+                v.to_string()
+            };
+            format!("({:?}.into(), {:?}.into())", k, value)
+        })
         .collect::<Vec<_>>();
 
+    if style_class.is_some() && element.value().attr("class").is_none() {
+        attrs.push(format!(
+            "(\"class\".into(), {:?}.into())",
+            style_class.as_deref().unwrap()
+        ));
+    }
+
+    let base_styles = stylesheet
+        .iter()
+        .filter(|rule| rule.max_width.is_none() && rule.selector.matches(&element))
+        .map(|rule| rule.style.as_str())
+        .collect::<Vec<_>>();
     let base_declarations = stylesheet
         .iter()
         .filter(|rule| rule.max_width.is_none() && rule.selector.matches(&element))
         .map(|rule| rule.declarations.as_str())
-        .filter(|declarations| !declarations.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if !base_declarations.is_empty() {
-        attrs.push(format!(
-            "(\"style\".into(), {:?}.into())",
-            base_declarations.join(";")
+        .collect::<Vec<_>>()
+        .join(";");
+    let attrs = attrs.join(",");
+    let class_binding = element
+        .value()
+        .attr("data-rsc-class-binding")
+        .map(|id| {
+            let id = id
+                .parse::<usize>()
+                .map_err(|_| format!("invalid class binding identifier {id:?}"))?;
+            class_bindings
+                .get(&id)
+                .map(String::as_str)
+                .ok_or_else(|| format!("missing class binding {id}"))
+        })
+        .transpose()?;
+    let mut style_builders = Vec::new();
+    let base_gpui_calls = gpui_style_calls(&base_declarations)?;
+    if !base_styles.is_empty() && kit_control {
+        style_builders.push(format!(".with_style({})", chain_styles(base_styles)));
+    }
+    let mobile_style = element
+        .value()
+        .attr("mobile-style")
+        .filter(|style| !style.trim().is_empty());
+    if let Some(mobile_style) = mobile_style.filter(|_| kit_control) {
+        style_builders.push(format!(
+            ".with_mobile_style({})",
+            style_expression(mobile_style)?
         ));
     }
-    if let Some(inline) = element.value().attr("style") {
-        if !inline.trim().is_empty() {
-            attrs.push(format!(
-                "(\"data-rsc-inline-style\".into(), {:?}.into())",
-                inline
-            ));
+    let inline_style = element
+        .value()
+        .attr("style")
+        .filter(|style| !style.trim().is_empty());
+    if let Some(inline_style) = inline_style.filter(|_| kit_control) {
+        style_builders.push(format!(
+            ".with_inline_style({})",
+            style_expression(inline_style)?
+        ));
+    }
+    if responsive_matches
+        .iter()
+        .any(|rule| animation_declaration(&rule.declarations).is_some())
+        || element
+            .value()
+            .attr("mobile-style")
+            .and_then(animation_declaration)
+            .is_some()
+    {
+        return Err("responsive animation is not supported yet".into());
+    }
+    let animation = element
+        .value()
+        .attr("style")
+        .and_then(animation_declaration)
+        .or_else(|| animation_declaration(&base_declarations));
+    let animation_fn = if let Some(animation) = animation {
+        let name = format!("__rsc_animate_{style_id}");
+        let call = gpui_animation_call(animation, keyframes, &name)?;
+        gpui_functions.push(format!(
+            "fn {name}(element: gpui::Div) -> gpui::AnyElement {{\n    use gpui_kit::AnimationExt as _;\n    use gpui_kit::*;\n    use std::time::Duration;\n    element{call}.into_any_element()\n}}"
+        ));
+        Some(name)
+    } else {
+        None
+    };
+    let mut child_codes = Vec::new();
+    let mut child_renders = Vec::new();
+    for child in element.children() {
+        match child.value() {
+            HtmlNode::Text(text) if !text.trim().is_empty() => {
+                let text = text.trim();
+                child_codes.push(format!("gpui_rsc::TemplateNode::Text({text:?}.into())"));
+                child_renders.push(format!("    container = container.child({text:?});\n"));
+            }
+            HtmlNode::Element(_) => {
+                let Some(child_element) = ElementRef::wrap(child) else {
+                    continue;
+                };
+                if child_element.value().name() == "style" {
+                    continue;
+                }
+                let child_id = *next_style_id;
+                let code = element_code(
+                    child_element,
+                    stylesheet,
+                    keyframes,
+                    scope,
+                    class_bindings,
+                    next_style_id,
+                    responsive_styles,
+                    gpui_functions,
+                )?;
+                let child_index = child_codes.len();
+                child_codes.push(format!("gpui_rsc::TemplateNode::Element({code})"));
+                child_renders.push(format!(
+                    "    container = container.child(__rsc_render_{child_id}(view, view.child_element(element, {child_index}), viewport_width, responsive_styles, dynamic_styles, cx));\n"
+                ));
+            }
+            _ => {}
         }
     }
-
-    for (index, rule) in stylesheet.iter().enumerate() {
-        if let Some(max_width) = rule.max_width.filter(|_| rule.selector.matches(&element)) {
-            attrs.push(format!(
-                "({:?}.into(), {:?}.into())",
-                format!("data-rsc-responsive-{index:04}"),
-                format!("{max_width}|{}", rule.declarations)
-            ));
-        }
+    if element.value().name() == "component" {
+        child_renders = vec!["    container = container.child(view.render_node(&element.children[0], viewport_width, responsive_styles, dynamic_styles, cx));\n".to_owned()];
     }
-    let attrs = attrs.join(",");
-    let children = element
-        .children()
-        .filter_map(|child| match child.value() {
-            HtmlNode::Text(t) if !t.trim().is_empty() => Some(format!(
-                "gpui_rsc::TemplateNode::Text({:?}.into())",
-                t.trim()
-            )),
-            HtmlNode::Element(_) => ElementRef::wrap(child).and_then(|e| {
-                (e.value().name() != "style").then(|| {
-                    format!(
-                        "gpui_rsc::TemplateNode::Element({})",
-                        element_code(e, stylesheet)
-                    )
-                })
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "gpui_rsc::TemplateElement::new({:?}, vec![{}], vec![{}])",
+    let children = child_codes.join(",");
+    let render_name = format!("__rsc_render_{style_id}");
+    if animation_fn.is_some()
+        && (matches!(
+            element.value().name(),
+            "output" | "input" | "select" | "option"
+        ) || (element.value().name() == "button" && element.value().attr("data-out").is_some()))
+    {
+        return Err(format!(
+            "animation on <{}> is not supported",
+            element.value().name()
+        ));
+    }
+    let mut render_body = format!("let mut container = div(){base_gpui_calls};\n");
+    if let Some(mobile_style) = mobile_style {
+        let calls = gpui_style_calls(mobile_style)?;
+        render_body.push_str(&format!(
+            "    if view.is_mobile(viewport_width) {{ container = container{calls}; }}\n"
+        ));
+    }
+    for rule in &responsive_matches {
+        let max_width = rule.max_width.unwrap();
+        let calls = gpui_style_calls(&rule.declarations)?;
+        render_body.push_str(&format!(
+            "    if viewport_width <= {max_width:?} {{ container = container{calls}; }}\n"
+        ));
+    }
+    render_body.push_str(
+        "    container = view.apply_dynamic_style(element, container, dynamic_styles);\n",
+    );
+    if let Some(expression) = class_binding {
+        render_body.push_str(
+            "    let style_context = gpui_rsc::runtime::StyleContext { viewport_width, snapshot: view.snapshot() };\n    let context = &style_context;\n",
+        );
+        if expression.contains("styles.") {
+            render_body.push_str("    let styles = styles(context);\n");
+        }
+        render_body.push_str(&format!(
+            "    let bound_class_style: gpui_rsc::runtime::Style = {expression};\n    container = bound_class_style.apply_to_gpui(container);\n"
+        ));
+    }
+    if let Some(inline_style) = inline_style {
+        let calls = gpui_style_calls(inline_style)?;
+        render_body.push_str(&format!("    container = container{calls};\n"));
+    }
+    let bound_style = if class_binding.is_some() {
+        "Some(&bound_class_style)"
+    } else {
+        "None"
+    };
+    let content = match element.value().name() {
+        "output" => "view.render_output(element, container)".to_owned(),
+        "input" => format!(
+            "view.render_slider(element, container, viewport_width, responsive_styles, dynamic_styles, {bound_style})"
+        ),
+        "select" => "view.render_select(element, container)".to_owned(),
+        "button" if element.value().attr("data-out").is_some() => {
+            format!(
+                "view.render_button(element, container, viewport_width, responsive_styles, dynamic_styles, {bound_style}, cx)"
+            )
+        }
+        "option" => "container.into_any_element()".to_owned(),
+        _ => {
+            let mut body = String::new();
+            for render in child_renders {
+                body.push_str(&render);
+            }
+            if let Some(name) = &animation_fn {
+                body.push_str(&format!("    {name}(container)"));
+            } else {
+                body.push_str("    container.into_any_element()");
+            }
+            body
+        }
+    };
+    render_body.push_str(&content);
+    gpui_functions.push(format!(
+        "#[allow(unused_imports, unused_variables)]\nfn {render_name}(view: &gpui_rsc::runtime::view::HtmlView, element: &gpui_rsc::runtime::binding::Element, viewport_width: f32, responsive_styles: &[gpui_rsc::runtime::StyleRule], dynamic_styles: &[gpui_rsc::runtime::StyleRule], cx: &mut gpui::Context<gpui_rsc::runtime::view::HtmlView>) -> gpui::AnyElement {{\n    use gpui_kit::*;\n    use gpui_rsc::runtime::Style;\n    {render_body}\n}}"
+    ));
+    style_builders.push(format!(".with_render({render_name})"));
+    Ok(format!(
+        "gpui_rsc::TemplateElement::new({:?}, vec![{}], vec![{}]){}",
         element.value().name(),
         attrs,
-        children
-    )
+        children,
+        style_builders.join(""),
+    ))
+}
+
+#[cfg(feature = "compiler")]
+fn chain_styles(styles: Vec<&str>) -> String {
+    let prefix = "gpui_rsc::runtime::InlineStyle::new()";
+    let calls = styles
+        .iter()
+        .filter_map(|style| style.strip_prefix(prefix))
+        .collect::<String>();
+    format!("{prefix}{calls}")
+}
+
+#[cfg(feature = "compiler")]
+fn animation_declaration(source: &str) -> Option<&str> {
+    source
+        .split(';')
+        .filter_map(|declaration| declaration.split_once(':'))
+        .filter(|(name, _)| name.trim() == "animation")
+        .map(|(_, value)| value.trim())
+        .last()
+}
+
+#[cfg(feature = "compiler")]
+fn style_expression(source: &str) -> Result<String, String> {
+    let mut calls = Vec::new();
+    for declaration in source
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (name, value) = declaration
+            .split_once(':')
+            .ok_or_else(|| format!("invalid style declaration {declaration:?}"))?;
+        let (name, value) = (name.trim(), value.trim());
+        let call = match name {
+            "display" if value == "flex" => ".flex()".to_owned(),
+            "display" => return Err(format!("unsupported display value {value:?}")),
+            "flex-direction" => match value {
+                "column" => ".flex_direction(true)".to_owned(),
+                "row" => ".flex_direction(false)".to_owned(),
+                _ => return Err(format!("unsupported flex-direction value {value:?}")),
+            },
+            "flex-wrap" => match value {
+                "wrap" => ".flex_wrap(true)".to_owned(),
+                "nowrap" => ".flex_wrap(false)".to_owned(),
+                _ => return Err(format!("unsupported flex-wrap value {value:?}")),
+            },
+            "flex" => match value {
+                "1" => ".flex_grow(true)".to_owned(),
+                "none" | "0" => ".flex_grow(false)".to_owned(),
+                _ => return Err(format!("unsupported flex value {value:?}")),
+            },
+            "gap" => format!(".gap({})", css_number(value)?),
+            "padding" => {
+                let values = css_box_values(value)?;
+                format!(
+                    ".padding({}, {}, {}, {})",
+                    values[0], values[1], values[2], values[3]
+                )
+            }
+            "background" | "background-color" => {
+                format!(".background_color({})", css_color(value)?)
+            }
+            "color" => format!(".text_color({})", css_color(value)?),
+            "font-size" => format!(".font_size({})", css_number(value)?),
+            "font-weight" => format!(".font_weight({})", css_integer(value)?),
+            "border" => {
+                let mut parts = value.split_whitespace();
+                let width = parts.next().ok_or("border needs a width")?;
+                let color = parts.last().ok_or("border needs a color")?;
+                format!(".border({}, {})", css_number(width)?, css_color(color)?)
+            }
+            "border-radius" => format!(".border_radius({})", css_number(value)?),
+            "width" => format!(".width({})", css_length(value)?),
+            "height" => format!(".height({})", css_length(value)?),
+            "min-width" => format!(".min_width({})", css_number(value)?),
+            "max-width" => format!(".max_width({})", css_number(value)?),
+            "margin" if value == "auto" => ".margin_auto()".to_owned(),
+            "margin" => return Err(format!("unsupported margin value {value:?}")),
+            "justify-content" => format!(".justify_content({value:?})"),
+            "align-items" => format!(".align_items({value:?})"),
+            "position" if value == "relative" || value == "absolute" => String::new(),
+            "top" | "right" | "bottom" | "left" => {
+                css_number(value)?;
+                String::new()
+            }
+            "overflow" if value == "hidden" => String::new(),
+            "opacity" => {
+                css_opacity(value)?;
+                String::new()
+            }
+            "animation" => String::new(),
+            "overflow-y" => match value {
+                "auto" | "scroll" => ".overflow_y(true)".to_owned(),
+                "hidden" | "visible" => ".overflow_y(false)".to_owned(),
+                _ => return Err(format!("unsupported overflow-y value {value:?}")),
+            },
+            _ => return Err(format!("unsupported CSS property {name:?}")),
+        };
+        calls.push(call);
+    }
+    Ok(format!(
+        "gpui_rsc::runtime::InlineStyle::new(){}",
+        calls.join("")
+    ))
+}
+
+#[cfg(feature = "compiler")]
+fn gpui_style_calls(source: &str) -> Result<String, String> {
+    let mut calls = String::new();
+    for declaration in source
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (name, value) = declaration
+            .split_once(':')
+            .ok_or_else(|| format!("invalid style declaration {declaration:?}"))?;
+        let (name, value) = (name.trim(), value.trim());
+        let call = match name {
+            "display" if value == "flex" => ".flex()".to_owned(),
+            "flex-direction" if value == "column" => ".flex_col()".to_owned(),
+            "flex-direction" if value == "row" => ".flex_row()".to_owned(),
+            "flex-wrap" if value == "wrap" => ".flex_wrap()".to_owned(),
+            "flex-wrap" if value == "nowrap" => ".flex_nowrap()".to_owned(),
+            "flex" if value == "1" => ".flex_1()".to_owned(),
+            "flex" if value == "0" || value == "none" => ".flex_none()".to_owned(),
+            "gap" => format!(".gap(px({}))", css_number(value)?),
+            "padding" => {
+                let [top, right, bottom, left] = css_box_values(value)?;
+                format!(".pt(px({top})).pr(px({right})).pb(px({bottom})).pl(px({left}))")
+            }
+            "background" | "background-color" => {
+                format!(".bg(rgb({}))", css_color(value)?)
+            }
+            "color" => format!(".text_color(rgb({}))", css_color(value)?),
+            "font-size" => format!(".text_size(px({}))", css_number(value)?),
+            "font-weight" => format!(".font_weight(FontWeight({:?}))", css_integer(value)? as f32),
+            "border" => {
+                let mut parts = value.split_whitespace();
+                let width = parts.next().ok_or("border needs a width")?;
+                let color = parts.last().ok_or("border needs a color")?;
+                let width = css_number(width)?;
+                format!(
+                    ".border(px({width})).border_color(rgb({}))",
+                    css_color(color)?
+                )
+            }
+            "border-radius" => format!(".rounded(px({}))", css_number(value)?),
+            "width" => format!(".w({})", css_gpui_length(value)?),
+            "height" => format!(".h({})", css_gpui_length(value)?),
+            "min-width" => format!(".min_w(px({}))", css_number(value)?),
+            "max-width" => format!(".max_w(px({}))", css_number(value)?),
+            "margin" if value == "auto" => ".mx_auto()".to_owned(),
+            "justify-content" if value == "space-between" => ".justify_between()".to_owned(),
+            "justify-content" if value == "center" => ".justify_center()".to_owned(),
+            "justify-content" if value == "flex-end" => ".justify_end()".to_owned(),
+            "align-items" if value == "center" => ".items_center()".to_owned(),
+            "align-items" if value == "flex-start" => ".items_start()".to_owned(),
+            "align-items" if value == "flex-end" => ".items_end()".to_owned(),
+            "position" if value == "relative" => ".relative()".to_owned(),
+            "position" if value == "absolute" => ".absolute()".to_owned(),
+            "top" => format!(".top(px({}))", css_number(value)?),
+            "right" => format!(".right(px({}))", css_number(value)?),
+            "bottom" => format!(".bottom(px({}))", css_number(value)?),
+            "left" => format!(".left(px({}))", css_number(value)?),
+            "overflow" if value == "hidden" => ".overflow_hidden()".to_owned(),
+            "opacity" => format!(".opacity({})", css_opacity(value)?),
+            "animation" => String::new(),
+            // The generated document container owns GPUI scrolling.
+            "overflow-y" if value == "auto" || value == "scroll" => String::new(),
+            "overflow-y" if value == "hidden" => ".overflow_y_hidden()".to_owned(),
+            "overflow-y" if value == "visible" => String::new(),
+            _ => return Err(format!("unsupported GPUI style {name}:{value}")),
+        };
+        calls.push_str(&call);
+    }
+    Ok(calls)
+}
+
+#[cfg(feature = "compiler")]
+fn gpui_animation_call(
+    value: &str,
+    keyframes: &HashMap<String, Keyframes>,
+    function_name: &str,
+) -> Result<String, String> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    let [name, duration, "infinite"] = parts.as_slice() else {
+        return Err(format!(
+            "animation needs a name, duration in ms, and infinite: {value:?}"
+        ));
+    };
+    let duration = duration
+        .strip_suffix("ms")
+        .ok_or_else(|| format!("animation duration must use ms: {value:?}"))?
+        .parse::<u64>()
+        .map_err(|_| format!("invalid animation duration: {value:?}"))?;
+    if duration == 0 {
+        return Err("animation duration must be positive".into());
+    }
+    let frames = keyframes
+        .get(*name)
+        .ok_or_else(|| format!("unknown @keyframes {name:?}"))?;
+    let mut calls = String::new();
+    for (property, from, to) in [
+        ("top", frames.from.top, frames.to.top),
+        ("bottom", frames.from.bottom, frames.to.bottom),
+        ("opacity", frames.from.opacity, frames.to.opacity),
+    ] {
+        match (from, to) {
+            (Some(from), Some(to)) => {
+                let value = format!("{from:?} + delta * {:?}", to - from);
+                calls.push_str(&match property {
+                    "top" => format!(".top(px({value}))"),
+                    "bottom" => format!(".bottom(px({value}))"),
+                    _ => format!(".opacity({value})"),
+                });
+            }
+            (None, None) => {}
+            _ => return Err(format!("{property} must be set in both animation stops")),
+        }
+    }
+    if calls.is_empty() {
+        return Err(format!("@keyframes {name:?} has no supported properties"));
+    }
+    Ok(format!(
+        ".with_animation({:?}, Animation::new(Duration::from_millis({duration})).repeat_synced(), |this, delta| this{calls})",
+        format!("{function_name}-{name}")
+    ))
+}
+
+#[cfg(feature = "compiler")]
+fn css_gpui_length(value: &str) -> Result<String, String> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let number = percent
+            .parse::<f32>()
+            .map_err(|_| format!("invalid CSS percentage {value:?}"))?;
+        if !number.is_finite() {
+            return Err(format!("invalid CSS percentage {value:?}"));
+        }
+        Ok(format!("relative({:?})", number / 100.0))
+    } else {
+        Ok(format!("px({})", css_number(value)?))
+    }
+}
+
+#[cfg(feature = "compiler")]
+fn css_opacity(value: &str) -> Result<String, String> {
+    let number = value
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| format!("invalid CSS opacity {value:?}"))?;
+    if !number.is_finite() || !(0.0..=1.0).contains(&number) {
+        return Err(format!("invalid CSS opacity {value:?}"));
+    }
+    Ok(format!("{number:?}"))
+}
+
+#[cfg(feature = "compiler")]
+fn css_number(value: &str) -> Result<String, String> {
+    let number = value.trim().strip_suffix("px").unwrap_or(value.trim());
+    let parsed = number
+        .parse::<f32>()
+        .map_err(|_| format!("invalid CSS length {value:?}"))?;
+    if !parsed.is_finite() {
+        return Err(format!("invalid CSS length {value:?}"));
+    }
+    Ok(format!("{parsed:?}"))
+}
+
+#[cfg(feature = "compiler")]
+fn css_integer(value: &str) -> Result<u16, String> {
+    value
+        .parse::<u16>()
+        .map_err(|_| format!("invalid CSS integer {value:?}"))
+}
+
+#[cfg(feature = "compiler")]
+fn css_color(value: &str) -> Result<String, String> {
+    let hex = value
+        .strip_prefix('#')
+        .ok_or_else(|| format!("unsupported CSS color {value:?}"))?;
+    let color = u32::from_str_radix(hex, 16).map_err(|_| format!("invalid CSS color {value:?}"))?;
+    if hex.len() != 3 && hex.len() != 6 {
+        return Err(format!("unsupported CSS color {value:?}"));
+    }
+    let color = if hex.len() == 3 {
+        let r = (color >> 8) & 0xf;
+        let g = (color >> 4) & 0xf;
+        let b = color & 0xf;
+        (r * 0x11 << 16) | (g * 0x11 << 8) | (b * 0x11)
+    } else {
+        color
+    };
+    Ok(format!("0x{color:06x}"))
+}
+
+#[cfg(feature = "compiler")]
+fn css_length(value: &str) -> Result<String, String> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let percent = percent
+            .parse::<f32>()
+            .map_err(|_| format!("invalid CSS percentage {value:?}"))?;
+        if !percent.is_finite() {
+            return Err(format!("invalid CSS percentage {value:?}"));
+        }
+        Ok(format!(
+            "gpui_rsc::runtime::Length::Percent({:?})",
+            percent / 100.0
+        ))
+    } else {
+        Ok(format!(
+            "gpui_rsc::runtime::Length::Px({})",
+            css_number(value)?
+        ))
+    }
+}
+
+#[cfg(feature = "compiler")]
+fn css_box_values(value: &str) -> Result<[String; 4], String> {
+    let values = value
+        .split_whitespace()
+        .map(css_number)
+        .collect::<Result<Vec<_>, _>>()?;
+    match values.as_slice() {
+        [all] => Ok([all.clone(), all.clone(), all.clone(), all.clone()]),
+        [vertical, horizontal] => Ok([
+            vertical.clone(),
+            horizontal.clone(),
+            vertical.clone(),
+            horizontal.clone(),
+        ]),
+        [top, horizontal, bottom] => Ok([
+            top.clone(),
+            horizontal.clone(),
+            bottom.clone(),
+            horizontal.clone(),
+        ]),
+        [top, right, bottom, left] => {
+            Ok([top.clone(), right.clone(), bottom.clone(), left.clone()])
+        }
+        _ => Err(format!("invalid CSS padding {value:?}")),
+    }
 }

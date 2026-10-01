@@ -1,8 +1,12 @@
 //! Binds a compiler-generated element tree to application state and GPUI Kit.
-use crate::runtime::{Binding, Definition, Direction, Snapshot, StyleSheet, Value};
+use crate::runtime::{
+    Binding, Definition, Direction, OutputFormatter, Snapshot, StyleSheet, Value,
+};
 
-use crate::{TemplateElement, TemplateNode};
+use crate::{RenderFn, TemplateElement, TemplateNode};
+use gpui::{Div, FontWeight, Styled as _, px, relative, rgb};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum Node {
@@ -14,11 +18,13 @@ pub struct Element {
     pub tag: String,
     pub attrs: HashMap<String, String>,
     pub style: InlineStyle,
+    pub mobile_style: InlineStyle,
+    pub inline_style: InlineStyle,
+    pub render: Option<RenderFn>,
     pub children: Vec<Node>,
     pub binding: Option<Binding>,
     pub args: Vec<Binding>,
     pub control_id: Option<String>,
-    pub output_id: Option<String>,
 }
 impl Element {
     pub fn attr(&self, key: &str) -> Option<&str> {
@@ -80,6 +86,8 @@ pub struct Page {
     pub defaults: HashMap<String, Value>,
     pub mobile_breakpoint: Option<f32>,
     pub style_sheets: Vec<StyleSheet>,
+    pub responsive_style_sheets: Vec<StyleSheet>,
+    pub output_formatter: Option<OutputFormatter>,
 }
 
 pub fn compile(def: &Definition) -> Result<Page, String> {
@@ -90,8 +98,7 @@ pub fn compile(def: &Definition) -> Result<Page, String> {
         .iter()
         .map(|b| (b.name.to_owned(), b.clone()))
         .collect();
-    let mut root = compile_component(def, &scope, def.name, &mut controls, &mut seen)?;
-    assign_output_ids(&mut root, &mut 0);
+    let root = compile_component(def, &scope, def.name, &mut controls, &mut seen)?;
     let defaults = controls
         .iter()
         .filter_map(|c| {
@@ -100,34 +107,29 @@ pub fn compile(def: &Definition) -> Result<Page, String> {
                 .map(|k| (k.to_owned(), c.default_value()))
         })
         .collect::<HashMap<_, _>>();
-    fn collect_style_sheets(definition: &Definition, into: &mut Vec<StyleSheet>) {
-        if let Some(style_sheet) = definition.style_sheet {
-            into.push(style_sheet);
-        }
+    fn collect_style_sheets(
+        definition: &Definition,
+        into: &mut Vec<StyleSheet>,
+        responsive: &mut Vec<StyleSheet>,
+    ) {
+        into.extend(definition.style_sheets.iter().copied());
+        responsive.extend(definition.responsive_style_sheets.iter().copied());
         for import in &definition.imports {
-            collect_style_sheets(import, into);
+            collect_style_sheets(import, into, responsive);
         }
     }
     let mut style_sheets = Vec::new();
-    collect_style_sheets(def, &mut style_sheets);
+    let mut responsive_style_sheets = Vec::new();
+    collect_style_sheets(def, &mut style_sheets, &mut responsive_style_sheets);
     Ok(Page {
         root,
         controls,
         defaults,
         mobile_breakpoint: def.mobile_breakpoint,
         style_sheets,
+        responsive_style_sheets,
+        output_formatter: def.output_formatter,
     })
-}
-fn assign_output_ids(element: &mut Element, next: &mut usize) {
-    if element.attr("data-in").is_some() {
-        element.output_id = Some(format!("output-{next}"));
-        *next += 1;
-    }
-    for child in &mut element.children {
-        if let Node::Element(child) = child {
-            assign_output_ids(child, next);
-        }
-    }
 }
 fn compile_component(
     def: &Definition,
@@ -327,8 +329,6 @@ fn compile_element(
                 && key != "mobile-style"
                 && key != "class"
                 && key != "id"
-                && key != "data-rsc-inline-style"
-                && !key.starts_with("data-rsc-responsive-")
                 && !child_scope.contains_key(key)
             {
                 return Err(format!("unknown parameter {key} on {name}"));
@@ -338,18 +338,15 @@ fn compile_element(
         let child_root = compile_component(child, &child_scope, &instance, controls, seen)?;
         return Ok(Element {
             tag: "div".into(),
-            style: InlineStyle::parse_with_mobile(
-                attr("style").unwrap_or(""),
-                attr("mobile-style").unwrap_or(""),
-                responsive_styles(&attrs),
-                attr("data-rsc-inline-style").unwrap_or(""),
-            ),
+            style: element.style.clone(),
+            mobile_style: element.mobile_style.clone(),
+            inline_style: element.inline_style.clone(),
+            render: element.render,
             attrs,
             children: vec![Node::Element(child_root)],
             binding: None,
             args: vec![],
             control_id: None,
-            output_id: None,
         });
     }
     let bindings = ["data-in", "data-out", "data-in-out"]
@@ -465,18 +462,15 @@ fn compile_element(
     }
     Ok(Element {
         tag,
-        style: InlineStyle::parse_with_mobile(
-            attr("style").unwrap_or(""),
-            attr("mobile-style").unwrap_or(""),
-            responsive_styles(&attrs),
-            attr("data-rsc-inline-style").unwrap_or(""),
-        ),
+        style: element.style.clone(),
+        mobile_style: element.mobile_style.clone(),
+        inline_style: element.inline_style.clone(),
+        render: element.render,
         attrs,
         children,
         binding,
         args,
         control_id,
-        output_id: None,
     })
 }
 #[derive(Clone, Copy, Debug)]
@@ -493,12 +487,12 @@ pub struct BoxValues {
     pub left: f32,
 }
 
-#[derive(Clone, Debug, Default)]
+type GpuiStyleOperation = Arc<dyn Fn(Div) -> Div + Send + Sync>;
+
+#[derive(Clone, Default)]
 pub struct InlineStyle {
-    pub mobile: Option<Box<InlineStyle>>,
-    pub responsive: Vec<ResponsiveStyle>,
-    pub(crate) inline: Option<Box<InlineStyle>>,
-    pub display_flex: bool,
+    gpui_operations: Vec<GpuiStyleOperation>,
+    pub display_flex: Option<bool>,
     pub column: Option<bool>,
     pub flex_wrap: Option<bool>,
     pub flex_grow: Option<bool>,
@@ -515,39 +509,10 @@ pub struct InlineStyle {
     pub height: Option<Length>,
     pub min_width: Option<f32>,
     pub max_width: Option<f32>,
-    pub margin_auto: bool,
+    pub margin_auto: Option<bool>,
     pub justify: Option<String>,
     pub align: Option<String>,
-    pub scroll_y: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct ResponsiveStyle {
-    pub max_width: f32,
-    pub style: InlineStyle,
-}
-
-fn responsive_styles(attrs: &HashMap<String, String>) -> Vec<ResponsiveStyle> {
-    let mut entries = attrs
-        .iter()
-        .filter_map(|(name, value)| {
-            let order = name
-                .strip_prefix("data-rsc-responsive-")?
-                .parse::<usize>()
-                .ok()?;
-            let (max_width, declarations) = value.split_once('|')?;
-            let max_width = max_width.parse::<f32>().ok()?;
-            (max_width.is_finite() && max_width > 0.0).then_some((
-                order,
-                ResponsiveStyle {
-                    max_width,
-                    style: InlineStyle::parse(declarations),
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|(order, _)| *order);
-    entries.into_iter().map(|(_, style)| style).collect()
+    pub scroll_y: Option<bool>,
 }
 
 impl InlineStyle {
@@ -556,27 +521,61 @@ impl InlineStyle {
     }
 
     pub fn flex(mut self) -> Self {
-        self.display_flex = true;
+        self.display_flex = Some(true);
+        self.gpui_operations
+            .push(Arc::new(|element| element.flex()));
+        self
+    }
+
+    pub fn display_flex(mut self, enabled: bool) -> Self {
+        self.display_flex = Some(enabled);
+        if enabled {
+            self.gpui_operations
+                .push(Arc::new(|element| element.flex()));
+        }
         self
     }
 
     pub fn flex_direction(mut self, column: bool) -> Self {
         self.column = Some(column);
+        self.gpui_operations.push(Arc::new(move |element| {
+            if column {
+                element.flex_col()
+            } else {
+                element.flex_row()
+            }
+        }));
         self
     }
 
     pub fn flex_wrap(mut self, wrap: bool) -> Self {
         self.flex_wrap = Some(wrap);
+        self.gpui_operations.push(Arc::new(move |element| {
+            if wrap {
+                element.flex_wrap()
+            } else {
+                element.flex_nowrap()
+            }
+        }));
         self
     }
 
     pub fn flex_grow(mut self, grow: bool) -> Self {
         self.flex_grow = Some(grow);
+        self.gpui_operations.push(Arc::new(move |element| {
+            if grow {
+                element.flex_1()
+            } else {
+                element.flex_none()
+            }
+        }));
         self
     }
 
     pub fn gap(mut self, pixels: f32) -> Self {
         self.gap = Some(pixels);
+        self.gpui_operations
+            .push(Arc::new(move |element| element.gap(px(pixels))));
         self
     }
 
@@ -587,127 +586,164 @@ impl InlineStyle {
             bottom,
             left,
         });
+        self.gpui_operations.push(Arc::new(move |element| {
+            element
+                .pt(px(top))
+                .pr(px(right))
+                .pb(px(bottom))
+                .pl(px(left))
+        }));
         self
     }
 
     pub fn background_color(mut self, rgb: u32) -> Self {
         self.background = Some(rgb & 0x00ff_ffff);
+        let color = self.background.unwrap();
+        self.gpui_operations
+            .push(Arc::new(move |element| element.bg(gpui::rgb(color))));
         self
     }
 
     pub fn text_color(mut self, rgb: u32) -> Self {
         self.color = Some(rgb & 0x00ff_ffff);
+        let color = self.color.unwrap();
+        self.gpui_operations.push(Arc::new(move |element| {
+            element.text_color(gpui::rgb(color))
+        }));
         self
     }
 
     pub fn width(mut self, width: Length) -> Self {
         self.width = Some(width);
+        self.gpui_operations
+            .push(Arc::new(move |element| match width {
+                Length::Px(value) => element.w(px(value)),
+                Length::Percent(value) => element.w(relative(value)),
+            }));
         self
     }
 
     pub fn height(mut self, height: Length) -> Self {
         self.height = Some(height);
+        self.gpui_operations
+            .push(Arc::new(move |element| match height {
+                Length::Px(value) => element.h(px(value)),
+                Length::Percent(value) => element.h(relative(value)),
+            }));
         self
     }
 
     pub fn min_width(mut self, pixels: f32) -> Self {
         self.min_width = Some(pixels);
+        self.gpui_operations
+            .push(Arc::new(move |element| element.min_w(px(pixels))));
         self
     }
 
     pub fn max_width(mut self, pixels: f32) -> Self {
         self.max_width = Some(pixels);
+        self.gpui_operations
+            .push(Arc::new(move |element| element.max_w(px(pixels))));
         self
     }
 
     pub fn border_radius(mut self, pixels: f32) -> Self {
         self.border_radius = Some(pixels);
+        self.gpui_operations
+            .push(Arc::new(move |element| element.rounded(px(pixels))));
+        self
+    }
+
+    pub fn font_size(mut self, pixels: f32) -> Self {
+        self.font_size = Some(pixels);
+        self.gpui_operations
+            .push(Arc::new(move |element| element.text_size(px(pixels))));
+        self
+    }
+
+    pub fn font_weight(mut self, weight: u16) -> Self {
+        self.font_weight = Some(weight);
+        self.gpui_operations.push(Arc::new(move |element| {
+            element.font_weight(FontWeight(weight as f32))
+        }));
+        self
+    }
+
+    pub fn border(mut self, pixels: f32, color: u32) -> Self {
+        self.border_width = Some(pixels);
+        self.border_color = Some(color & 0x00ff_ffff);
+        let color = self.border_color.unwrap();
+        self.gpui_operations.push(Arc::new(move |element| {
+            element.border(px(pixels)).border_color(rgb(color))
+        }));
+        self
+    }
+
+    pub fn margin_auto(mut self) -> Self {
+        self.margin_auto = Some(true);
+        self.gpui_operations
+            .push(Arc::new(|element| element.mx_auto()));
+        self
+    }
+
+    pub fn margin_auto_enabled(mut self, enabled: bool) -> Self {
+        self.margin_auto = Some(enabled);
+        if enabled {
+            self.gpui_operations
+                .push(Arc::new(|element| element.mx_auto()));
+        }
+        self
+    }
+
+    pub fn overflow_y(mut self, scroll: bool) -> Self {
+        self.scroll_y = Some(scroll);
         self
     }
 
     pub fn justify_content(mut self, value: impl Into<String>) -> Self {
         self.justify = Some(value.into());
+        match self.justify.as_deref() {
+            Some("space-between") => self
+                .gpui_operations
+                .push(Arc::new(|element| element.justify_between())),
+            Some("center") => self
+                .gpui_operations
+                .push(Arc::new(|element| element.justify_center())),
+            Some("flex-end") => self
+                .gpui_operations
+                .push(Arc::new(|element| element.justify_end())),
+            _ => {}
+        }
         self
     }
 
     pub fn align_items(mut self, value: impl Into<String>) -> Self {
         self.align = Some(value.into());
+        match self.align.as_deref() {
+            Some("center") => self
+                .gpui_operations
+                .push(Arc::new(|element| element.items_center())),
+            Some("flex-start") => self
+                .gpui_operations
+                .push(Arc::new(|element| element.items_start())),
+            Some("flex-end") => self
+                .gpui_operations
+                .push(Arc::new(|element| element.items_end())),
+            _ => {}
+        }
         self
     }
 
-    fn parse(source: &str) -> Self {
-        let mut style = Self::default();
-        for declaration in source.split(';') {
-            let Some((name, value)) = declaration.split_once(':') else {
-                continue;
-            };
-            let (name, value) = (name.trim(), value.trim());
-            match name {
-                "display" => style.display_flex = value == "flex",
-                "flex-direction" => style.column = Some(value == "column"),
-                "flex-wrap" => style.flex_wrap = Some(value == "wrap"),
-                "flex" => style.flex_grow = Some(value == "1"),
-                "gap" => style.gap = px_value(value),
-                "padding" => style.padding = box_values(value),
-                "background" | "background-color" => style.background = color(value),
-                "color" => style.color = color(value),
-                "font-size" => style.font_size = px_value(value),
-                "font-weight" => style.font_weight = value.parse().ok(),
-                "border" => {
-                    style.border_width = value.split_whitespace().next().and_then(px_value);
-                    style.border_color = value.split_whitespace().last().and_then(color);
-                }
-                "border-radius" => style.border_radius = px_value(value),
-                "width" => style.width = length(value),
-                "height" => style.height = length(value),
-                "min-width" => style.min_width = px_value(value),
-                "max-width" => style.max_width = px_value(value),
-                "margin" => style.margin_auto = value == "auto",
-                "justify-content" => style.justify = Some(value.to_owned()),
-                "align-items" => style.align = Some(value.to_owned()),
-                "overflow-y" => style.scroll_y = value == "auto" || value == "scroll",
-                _ => {}
-            }
-        }
-        style
-    }
-
-    fn parse_with_mobile(
-        source: &str,
-        mobile_source: &str,
-        responsive: Vec<ResponsiveStyle>,
-        inline_source: &str,
-    ) -> Self {
-        let mut style = Self::parse(source);
-        style.responsive = responsive;
-        if !inline_source.trim().is_empty() {
-            style.inline = Some(Box::new(Self::parse(inline_source)));
-        }
-        if !mobile_source.trim().is_empty() {
-            style.mobile = Some(Box::new(Self::parse(mobile_source)));
-        }
-        style
-    }
-
-    pub fn for_viewport(&self, viewport_width: f32, mobile_breakpoint: Option<f32>) -> Self {
-        let mut style = self.clone();
-        style.mobile = None;
-        style.responsive.clear();
-        if mobile_breakpoint.is_some_and(|breakpoint| viewport_width <= breakpoint) {
-            if let Some(overrides) = &self.mobile {
-                style.apply_overrides(overrides);
-            }
-        }
-        for responsive in &self.responsive {
-            if viewport_width <= responsive.max_width {
-                style.apply_overrides(&responsive.style);
-            }
-        }
-        style
+    pub(crate) fn apply_to_gpui(&self, element: Div) -> Div {
+        self.gpui_operations
+            .iter()
+            .fold(element, |element, apply| apply(element))
     }
 
     pub(crate) fn apply_overrides(&mut self, overrides: &InlineStyle) {
-        self.display_flex |= overrides.display_flex;
+        self.gpui_operations
+            .extend(overrides.gpui_operations.iter().cloned());
+        self.display_flex = overrides.display_flex.or(self.display_flex);
         self.column = overrides.column.or(self.column);
         self.flex_wrap = overrides.flex_wrap.or(self.flex_wrap);
         self.flex_grow = overrides.flex_grow.or(self.flex_grow);
@@ -724,59 +760,9 @@ impl InlineStyle {
         self.height = overrides.height.or(self.height);
         self.min_width = overrides.min_width.or(self.min_width);
         self.max_width = overrides.max_width.or(self.max_width);
-        self.margin_auto |= overrides.margin_auto;
+        self.margin_auto = overrides.margin_auto.or(self.margin_auto);
         self.justify = overrides.justify.clone().or(self.justify.clone());
         self.align = overrides.align.clone().or(self.align.clone());
-        self.scroll_y |= overrides.scroll_y;
-    }
-}
-
-fn px_value(value: &str) -> Option<f32> {
-    value.trim_end_matches("px").parse().ok()
-}
-fn length(value: &str) -> Option<Length> {
-    if let Some(percent) = value.strip_suffix('%') {
-        percent
-            .parse::<f32>()
-            .ok()
-            .map(|v| Length::Percent(v / 100.0))
-    } else {
-        px_value(value).map(Length::Px)
-    }
-}
-fn color(value: &str) -> Option<u32> {
-    u32::from_str_radix(value.strip_prefix('#')?, 16).ok()
-}
-fn box_values(value: &str) -> Option<BoxValues> {
-    let numbers: Vec<f32> = value
-        .split_whitespace()
-        .map(px_value)
-        .collect::<Option<_>>()?;
-    match numbers.as_slice() {
-        [all] => Some(BoxValues {
-            top: *all,
-            right: *all,
-            bottom: *all,
-            left: *all,
-        }),
-        [vertical, horizontal] => Some(BoxValues {
-            top: *vertical,
-            right: *horizontal,
-            bottom: *vertical,
-            left: *horizontal,
-        }),
-        [top, horizontal, bottom] => Some(BoxValues {
-            top: *top,
-            right: *horizontal,
-            bottom: *bottom,
-            left: *horizontal,
-        }),
-        [top, right, bottom, left] => Some(BoxValues {
-            top: *top,
-            right: *right,
-            bottom: *bottom,
-            left: *left,
-        }),
-        _ => None,
+        self.scroll_y = overrides.scroll_y.or(self.scroll_y);
     }
 }

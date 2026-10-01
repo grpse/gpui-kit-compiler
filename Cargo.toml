@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-scraper = "0.24"
-gpui-kit = "0.7"
-async-channel = "2"
+scraper = { version = "0.24", optional = true }
 
 [features]
+default = ["compiler"]
+compiler = ["dep:scraper"]
 debug-fps = []
+
+[[bin]]
+name = "gpui-rsc"
+path = "src/main.rs"
+required-features = ["compiler"]
