@@ -4,12 +4,12 @@ use gpui_rsc::runtime::{Value, Snapshot};
 use std::collections::HashMap;
 
 use gpui_rsc::{component, runtime::{Definition, InlineStyle as Style, Length, StyleContext}};
-use crate::generated::{brew_visualization, coffee_profile, coffee_variables_form};
+use crate::generated::{coffee_profile, coffee_variables_form, extraction_previews};
 
 pub fn definition() -> Definition {
     component! {
         name: "app",
-        imports: [coffee_variables_form::CoffeeVariablesFormComponent::definition(), coffee_profile::CoffeeProfileComponent::definition(), brew_visualization::BrewVisualizationComponent::definition()],
+        imports: [coffee_variables_form::CoffeeVariablesFormComponent::definition(), coffee_profile::CoffeeProfileComponent::definition(), extraction_previews::ExtractionPreviewsComponent::definition()],
         bindings: [
             in_out_binding!("method" => "recipe.method"),
             in_out_binding!("dose" => "recipe.dose"),
@@ -337,7 +337,7 @@ pub fn adjust_recipe_to_target(recipe: &mut HashMap<String, Value>, changed_key:
     <div class="cards">
       <component class="mobile-card controls-form" class={styles.mobile_card} name="coffee-variables-form" method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
       <component class="mobile-card profile-form" class={styles.mobile_card} name="coffee-profile" acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
-      <component class="mobile-card brew-preview" class={mobile_card_style(context)} name="brew-visualization" method="[method]" filter="[filter]" water="[water]" pours="[pours]" acidity="[acidity]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" intensity="[intensity]" extraction_signal="[extraction_signal]" character="[character]" />
+      <component class="extraction-gallery" name="extraction-previews" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" />
     </div>
   </main>
 </body>

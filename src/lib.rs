@@ -47,31 +47,18 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or("invalid filename")?;
-    let style_scope = stem
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '_' {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
     let body = document
         .select(&Selector::parse("body").unwrap())
         .next()
         .ok_or("component needs <body>")?;
-    let mut responsive_styles = Vec::new();
     let mut gpui_functions = Vec::new();
     let mut next_style_id = 0;
     let tree = element_code(
         body,
         &stylesheet,
         &keyframes,
-        &style_scope,
         &class_bindings,
         &mut next_style_id,
-        &mut responsive_styles,
         &mut gpui_functions,
     )?;
     let title = document
@@ -93,30 +80,16 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
             .collect::<String>()
     );
     // Script is inserted verbatim. It can contain any Rust items, functions, and methods.
-    let responsive_styles = if responsive_styles.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\nfn __rsc_responsive_styles(context: &gpui_rsc::runtime::StyleContext<'_>) -> Vec<gpui_rsc::runtime::StyleRule> {{\n    let mut styles = Vec::new();\n{}\n    styles\n}}\n",
-            responsive_styles.join("\n")
-        )
-    };
-    let attach_responsive_styles = if responsive_styles.is_empty() {
-        "definition()".to_owned()
-    } else {
-        "definition().with_responsive_style_sheet(__rsc_responsive_styles)".to_owned()
-    };
     let generated = format!(
-        "// Generated Rust source from {}.\n{}{}\n{}\npub struct {};\nimpl gpui_rsc::CompiledComponent for {} {{\n    fn template() -> gpui_rsc::TemplateElement {{ {} }}\n}}\nimpl {} {{\n    pub fn definition() -> gpui_rsc::runtime::Definition {{ {} }}\n    pub fn template() -> gpui_rsc::TemplateElement {{ <Self as gpui_rsc::CompiledComponent>::template() }}\n}}\npub fn template() -> gpui_rsc::TemplateElement {{ {}::template() }}\npub fn title() -> &'static str {{ {:?} }}\n",
+        "// Generated Rust source from {}.\n{}\n{}\npub struct {};\nimpl gpui_rsc::CompiledComponent for {} {{\n    fn template() -> gpui_rsc::TemplateElement {{ {} }}\n}}\nimpl {} {{\n    pub fn definition() -> gpui_rsc::runtime::Definition {{ {} }}\n    pub fn template() -> gpui_rsc::TemplateElement {{ <Self as gpui_rsc::CompiledComponent>::template() }}\n}}\npub fn template() -> gpui_rsc::TemplateElement {{ {}::template() }}\npub fn title() -> &'static str {{ {:?} }}\n",
         input.display(),
         script,
-        responsive_styles,
         gpui_functions.join("\n"),
         struct_name,
         struct_name,
         tree,
         struct_name,
-        attach_responsive_styles,
+        "definition()",
         struct_name,
         title
     );
@@ -350,7 +323,6 @@ fn rust_brace_end(source: &str, open: usize) -> Result<usize, String> {
 struct CssRule {
     selector: Selector,
     max_width: Option<f32>,
-    style: String,
     declarations: String,
 }
 
@@ -428,10 +400,10 @@ fn parse_stylesheet(
         } else if !header.starts_with('@') {
             let selector = Selector::parse(header)
                 .map_err(|error| format!("invalid selector {header:?}: {error:?}"))?;
+            gpui_style_calls(body)?;
             rules.push(CssRule {
                 selector,
                 max_width: inherited_max_width,
-                style: style_expression(body)?,
                 declarations: body.trim().to_owned(),
             });
         }
@@ -577,64 +549,24 @@ fn element_code(
     element: ElementRef<'_>,
     stylesheet: &[CssRule],
     keyframes: &HashMap<String, Keyframes>,
-    scope: &str,
     class_bindings: &HashMap<usize, String>,
     next_style_id: &mut usize,
-    responsive_styles: &mut Vec<String>,
     gpui_functions: &mut Vec<String>,
 ) -> Result<String, String> {
     let style_id = *next_style_id;
     *next_style_id += 1;
-    let kit_control = element.value().name() == "input"
-        || (element.value().name() == "button" && element.value().attr("data-out").is_some());
-    let responsive_matches = stylesheet
+    let element_responsive = stylesheet
         .iter()
         .filter(|rule| rule.max_width.is_some() && rule.selector.matches(&element))
         .collect::<Vec<_>>();
-    let style_class = if responsive_matches.is_empty() || !kit_control {
-        None
-    } else {
-        let class = format!("__rsc_{scope}_{style_id:04}");
-        for rule in &responsive_matches {
-            let max_width = rule.max_width.unwrap();
-            responsive_styles.push(format!(
-                "    if context.viewport_width <= {max_width:?} {{ styles.push(gpui_rsc::runtime::StyleRule::new({:?}, {})); }}",
-                format!(".{class}"),
-                rule.style
-            ));
-        }
-        Some(class)
-    };
 
-    let mut attrs = element
+    let attrs = element
         .value()
         .attrs()
         .filter(|(key, _)| {
             *key != "style" && *key != "mobile-style" && *key != "data-rsc-class-binding"
         })
-        .map(|(k, v)| {
-            let value = if k == "class" {
-                style_class
-                    .as_ref()
-                    .map_or_else(|| v.to_string(), |class| format!("{} {class}", v.trim()))
-            } else {
-                v.to_string()
-            };
-            format!("({:?}.into(), {:?}.into())", k, value)
-        })
-        .collect::<Vec<_>>();
-
-    if style_class.is_some() && element.value().attr("class").is_none() {
-        attrs.push(format!(
-            "(\"class\".into(), {:?}.into())",
-            style_class.as_deref().unwrap()
-        ));
-    }
-
-    let base_styles = stylesheet
-        .iter()
-        .filter(|rule| rule.max_width.is_none() && rule.selector.matches(&element))
-        .map(|rule| rule.style.as_str())
+        .map(|(k, v)| format!("({:?}.into(), {:?}.into())", k, v))
         .collect::<Vec<_>>();
     let base_declarations = stylesheet
         .iter()
@@ -656,32 +588,16 @@ fn element_code(
                 .ok_or_else(|| format!("missing class binding {id}"))
         })
         .transpose()?;
-    let mut style_builders = Vec::new();
     let base_gpui_calls = gpui_style_calls(&base_declarations)?;
-    if !base_styles.is_empty() && kit_control {
-        style_builders.push(format!(".with_style({})", style_expression(&base_declarations)?));
-    }
     let mobile_style = element
         .value()
         .attr("mobile-style")
         .filter(|style| !style.trim().is_empty());
-    if let Some(mobile_style) = mobile_style.filter(|_| kit_control) {
-        style_builders.push(format!(
-            ".with_mobile_style({})",
-            style_expression(mobile_style)?
-        ));
-    }
     let inline_style = element
         .value()
         .attr("style")
         .filter(|style| !style.trim().is_empty());
-    if let Some(inline_style) = inline_style.filter(|_| kit_control) {
-        style_builders.push(format!(
-            ".with_inline_style({})",
-            style_expression(inline_style)?
-        ));
-    }
-    if responsive_matches
+    if element_responsive
         .iter()
         .any(|rule| animation_declaration(&rule.declarations).is_some())
         || element
@@ -728,23 +644,21 @@ fn element_code(
                     child_element,
                     stylesheet,
                     keyframes,
-                    scope,
                     class_bindings,
                     next_style_id,
-                    responsive_styles,
                     gpui_functions,
                 )?;
                 let child_index = child_codes.len();
                 child_codes.push(format!("gpui_rsc::TemplateNode::Element({code})"));
                 child_renders.push(format!(
-                    "    container = container.child(__rsc_render_{child_id}(view, view.child_element(element, {child_index}), viewport_width, responsive_styles, dynamic_styles, cx));\n"
+                    "    container = container.child(__rsc_render_{child_id}(view, view.child_element(element, {child_index}), viewport_width, cx));\n"
                 ));
             }
             _ => {}
         }
     }
     if element.value().name() == "component" {
-        child_renders = vec!["    container = container.child(view.render_node(&element.children[0], viewport_width, responsive_styles, dynamic_styles, cx));\n".to_owned()];
+        child_renders = vec!["    container = container.child(view.render_node(&element.children[0], viewport_width, cx));\n".to_owned()];
     }
     let children = child_codes.join(",");
     let render_name = format!("__rsc_render_{style_id}");
@@ -766,16 +680,13 @@ fn element_code(
             "    if view.is_mobile(viewport_width) {{ container = container{calls}; }}\n"
         ));
     }
-    for rule in &responsive_matches {
+    for rule in &element_responsive {
         let max_width = rule.max_width.unwrap();
         let calls = gpui_style_calls(&rule.declarations)?;
         render_body.push_str(&format!(
             "    if viewport_width <= {max_width:?} {{ container = container{calls}; }}\n"
         ));
     }
-    render_body.push_str(
-        "    container = view.apply_dynamic_style(element, container, dynamic_styles);\n",
-    );
     if let Some(expression) = class_binding {
         render_body.push_str(
             "    let style_context = gpui_rsc::runtime::StyleContext { viewport_width, snapshot: view.snapshot() };\n    let context = &style_context;\n",
@@ -791,21 +702,12 @@ fn element_code(
         let calls = gpui_style_calls(inline_style)?;
         render_body.push_str(&format!("    container = container{calls};\n"));
     }
-    let bound_style = if class_binding.is_some() {
-        "Some(&bound_class_style)"
-    } else {
-        "None"
-    };
     let content = match element.value().name() {
         "output" => "view.render_output(element, container)".to_owned(),
-        "input" => format!(
-            "view.render_slider(element, container, viewport_width, responsive_styles, dynamic_styles, {bound_style})"
-        ),
+        "input" => "{ let control_style = container.style().clone(); view.render_slider(element, container, control_style) }".to_owned(),
         "select" => "view.render_select(element, container)".to_owned(),
         "button" if element.value().attr("data-out").is_some() => {
-            format!(
-                "view.render_button(element, container, viewport_width, responsive_styles, dynamic_styles, {bound_style}, cx)"
-            )
+            "{ let control_style = container.style().clone(); view.render_button(element, container, control_style, cx) }".to_owned()
         }
         "option" => "container.into_any_element()".to_owned(),
         _ => {
@@ -823,15 +725,13 @@ fn element_code(
     };
     render_body.push_str(&content);
     gpui_functions.push(format!(
-        "#[allow(unused_imports, unused_variables)]\nfn {render_name}(view: &gpui_rsc::runtime::view::HtmlView, element: &gpui_rsc::runtime::binding::Element, viewport_width: f32, responsive_styles: &[gpui_rsc::runtime::StyleRule], dynamic_styles: &[gpui_rsc::runtime::StyleRule], cx: &mut gpui::Context<gpui_rsc::runtime::view::HtmlView>) -> gpui::AnyElement {{\n    use gpui_kit::*;\n    use gpui_rsc::runtime::Style;\n    {render_body}\n}}"
+        "#[allow(unused_imports, unused_variables, unused_mut)]\nfn {render_name}(view: &gpui_rsc::runtime::view::HtmlView, element: &gpui_rsc::runtime::binding::Element, viewport_width: f32, cx: &mut gpui::Context<gpui_rsc::runtime::view::HtmlView>) -> gpui::AnyElement {{\n    use gpui_kit::*;\n    use gpui_rsc::runtime::Style;\n    {render_body}\n}}"
     ));
-    style_builders.push(format!(".with_render({render_name})"));
     Ok(format!(
-        "gpui_rsc::TemplateElement::new({:?}, vec![{}], vec![{}]){}",
+        "gpui_rsc::TemplateElement::new({:?}, vec![{}], vec![{}]).with_render({render_name})",
         element.value().name(),
         attrs,
-        children,
-        style_builders.join(""),
+        children
     ))
 }
 
@@ -843,12 +743,6 @@ fn animation_declaration(source: &str) -> Option<&str> {
         .filter(|(name, _)| name.trim() == "animation")
         .map(|(_, value)| value.trim())
         .last()
-}
-
-#[cfg(feature = "compiler")]
-fn style_expression(source: &str) -> Result<String, String> {
-    let calls = gpui_style_calls(source)?;
-    Ok(format!("{{ use gpui_kit::*; let mut value = div(){calls}; value.style().clone() }}"))
 }
 
 #[cfg(feature = "compiler")]
@@ -876,6 +770,10 @@ fn gpui_style_calls(source: &str) -> Result<String, String> {
                 let [top, right, bottom, left] = css_box_values(value)?;
                 format!(".pt(px({top})).pr(px({right})).pb(px({bottom})).pl(px({left}))")
             }
+            "padding-top" => format!(".pt(px({}))", css_number(value)?),
+            "padding-right" => format!(".pr(px({}))", css_number(value)?),
+            "padding-bottom" => format!(".pb(px({}))", css_number(value)?),
+            "padding-left" => format!(".pl(px({}))", css_number(value)?),
             "background" | "background-color" => {
                 format!(".bg(rgb({}))", css_color(value)?)
             }
@@ -901,6 +799,7 @@ fn gpui_style_calls(source: &str) -> Result<String, String> {
             "justify-content" if value == "space-between" => ".justify_between()".to_owned(),
             "justify-content" if value == "center" => ".justify_center()".to_owned(),
             "justify-content" if value == "flex-end" => ".justify_end()".to_owned(),
+            "justify-content" if value == "flex-start" => ".justify_start()".to_owned(),
             "align-items" if value == "center" => ".items_center()".to_owned(),
             "align-items" if value == "flex-start" => ".items_start()".to_owned(),
             "align-items" if value == "flex-end" => ".items_end()".to_owned(),
@@ -1039,27 +938,6 @@ fn css_color(value: &str) -> Result<String, String> {
         color
     };
     Ok(format!("0x{color:06x}"))
-}
-
-#[cfg(feature = "compiler")]
-fn css_length(value: &str) -> Result<String, String> {
-    if let Some(percent) = value.strip_suffix('%') {
-        let percent = percent
-            .parse::<f32>()
-            .map_err(|_| format!("invalid CSS percentage {value:?}"))?;
-        if !percent.is_finite() {
-            return Err(format!("invalid CSS percentage {value:?}"));
-        }
-        Ok(format!(
-            "gpui_rsc::runtime::Length::Percent({:?})",
-            percent / 100.0
-        ))
-    } else {
-        Ok(format!(
-            "gpui_rsc::runtime::Length::Px({})",
-            css_number(value)?
-        ))
-    }
 }
 
 #[cfg(feature = "compiler")]

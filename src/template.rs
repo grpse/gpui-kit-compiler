@@ -3,8 +3,6 @@ pub type RenderFn = fn(
     &runtime::view::HtmlView,
     &runtime::binding::Element,
     f32,
-    &[runtime::StyleRule],
-    &[runtime::StyleRule],
     &mut gpui::Context<runtime::view::HtmlView>,
 ) -> gpui::AnyElement;
 
@@ -19,9 +17,6 @@ pub struct TemplateElement {
     pub tag: String,
     pub attrs: Vec<(String, String)>,
     pub children: Vec<TemplateNode>,
-    pub style: runtime::InlineStyle,
-    pub mobile_style: runtime::InlineStyle,
-    pub inline_style: runtime::InlineStyle,
     pub render: Option<RenderFn>,
 }
 
@@ -35,26 +30,8 @@ impl TemplateElement {
             tag: tag.into(),
             attrs,
             children,
-            style: runtime::InlineStyle::default(),
-            mobile_style: runtime::InlineStyle::default(),
-            inline_style: runtime::InlineStyle::default(),
             render: None,
         }
-    }
-
-    pub fn with_style(mut self, style: runtime::InlineStyle) -> Self {
-        self.style = style;
-        self
-    }
-
-    pub fn with_mobile_style(mut self, style: runtime::InlineStyle) -> Self {
-        self.mobile_style = style;
-        self
-    }
-
-    pub fn with_inline_style(mut self, style: runtime::InlineStyle) -> Self {
-        self.inline_style = style;
-        self
     }
 
     pub fn with_render(mut self, render: RenderFn) -> Self {

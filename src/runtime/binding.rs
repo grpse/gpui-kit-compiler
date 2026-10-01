@@ -1,7 +1,5 @@
 //! Binds a compiler-generated element tree to application state and GPUI Kit.
-use crate::runtime::{
-    Binding, Definition, Direction, OutputFormatter, Snapshot, StyleSheet, Value,
-};
+use crate::runtime::{Binding, Definition, Direction, OutputFormatter, Snapshot, Value};
 
 use crate::{RenderFn, TemplateElement, TemplateNode};
 use std::collections::{HashMap, HashSet};
@@ -15,9 +13,6 @@ pub enum Node {
 pub struct Element {
     pub tag: String,
     pub attrs: HashMap<String, String>,
-    pub style: InlineStyle,
-    pub mobile_style: InlineStyle,
-    pub inline_style: InlineStyle,
     pub render: Option<RenderFn>,
     pub children: Vec<Node>,
     pub binding: Option<Binding>,
@@ -83,8 +78,6 @@ pub struct Page {
     pub controls: Vec<Control>,
     pub defaults: HashMap<String, Value>,
     pub mobile_breakpoint: Option<f32>,
-    pub style_sheets: Vec<StyleSheet>,
-    pub responsive_style_sheets: Vec<StyleSheet>,
     pub output_formatter: Option<OutputFormatter>,
 }
 
@@ -105,27 +98,11 @@ pub fn compile(def: &Definition) -> Result<Page, String> {
                 .map(|k| (k.to_owned(), c.default_value()))
         })
         .collect::<HashMap<_, _>>();
-    fn collect_style_sheets(
-        definition: &Definition,
-        into: &mut Vec<StyleSheet>,
-        responsive: &mut Vec<StyleSheet>,
-    ) {
-        into.extend(definition.style_sheets.iter().copied());
-        responsive.extend(definition.responsive_style_sheets.iter().copied());
-        for import in &definition.imports {
-            collect_style_sheets(import, into, responsive);
-        }
-    }
-    let mut style_sheets = Vec::new();
-    let mut responsive_style_sheets = Vec::new();
-    collect_style_sheets(def, &mut style_sheets, &mut responsive_style_sheets);
     Ok(Page {
         root,
         controls,
         defaults,
         mobile_breakpoint: def.mobile_breakpoint,
-        style_sheets,
-        responsive_style_sheets,
         output_formatter: def.output_formatter,
     })
 }
@@ -336,9 +313,6 @@ fn compile_element(
         let child_root = compile_component(child, &child_scope, &instance, controls, seen)?;
         return Ok(Element {
             tag: "div".into(),
-            style: element.style.clone(),
-            mobile_style: element.mobile_style.clone(),
-            inline_style: element.inline_style.clone(),
             render: element.render,
             attrs,
             children: vec![Node::Element(child_root)],
@@ -460,9 +434,6 @@ fn compile_element(
     }
     Ok(Element {
         tag,
-        style: element.style.clone(),
-        mobile_style: element.mobile_style.clone(),
-        inline_style: element.inline_style.clone(),
         render: element.render,
         attrs,
         children,

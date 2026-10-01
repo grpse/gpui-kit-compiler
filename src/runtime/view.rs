@@ -5,9 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::runtime::binding::{self, Control, Element, InlineStyle, Node, Page};
-use crate::runtime::{
-    Definition, Engine, OutputFormatter, Snapshot, StyleContext, StyleRule, StyleSheet, Value,
-};
+use crate::runtime::{Definition, Engine, OutputFormatter, Snapshot, Value};
 use gpui_kit::component::{
     IndexPath, TitleBar,
     button::{Button, ButtonVariants},
@@ -16,7 +14,6 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use gpui::Refineable as _;
 
 pub struct HtmlView {
     title: String,
@@ -244,19 +241,11 @@ impl HtmlView {
         &self,
         node: &Node,
         viewport_width: f32,
-        responsive_styles: &[StyleRule],
-        dynamic_styles: &[StyleRule],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
             Node::Text(value) => div().child(value.clone()).into_any_element(),
-            Node::Element(element) => self.render_element(
-                element,
-                viewport_width,
-                responsive_styles,
-                dynamic_styles,
-                cx,
-            ),
+            Node::Element(element) => self.render_element(element, viewport_width, cx),
         }
     }
 
@@ -271,8 +260,6 @@ impl HtmlView {
         &self,
         element: &Element,
         viewport_width: f32,
-        responsive_styles: &[StyleRule],
-        dynamic_styles: &[StyleRule],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         element
@@ -281,8 +268,6 @@ impl HtmlView {
             self,
             element,
             viewport_width,
-            responsive_styles,
-            dynamic_styles,
             cx,
         )
     }
@@ -295,16 +280,6 @@ impl HtmlView {
 
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
-    }
-
-    pub fn apply_dynamic_style(
-        &self,
-        element: &Element,
-        container: Div,
-        dynamic_styles: &[StyleRule],
-    ) -> Div {
-        let dynamic_style = dynamic_style_for_element(element, dynamic_styles);
-        { let mut container = container; container.style().refine(&dynamic_style); container }
     }
 
     pub fn render_output(&self, element: &Element, container: Div) -> AnyElement {
@@ -334,19 +309,8 @@ impl HtmlView {
         &self,
         element: &Element,
         container: Div,
-        viewport_width: f32,
-        responsive_styles: &[StyleRule],
-        dynamic_styles: &[StyleRule],
-        bound_style: Option<&InlineStyle>,
+        style: InlineStyle,
     ) -> AnyElement {
-        let style = style_for_element(
-            element,
-            viewport_width,
-            self.page.mobile_breakpoint,
-            responsive_styles,
-            dynamic_styles,
-            bound_style,
-        );
         let key = element
             .control_id
             .as_deref()
@@ -380,20 +344,9 @@ impl HtmlView {
         &self,
         element: &Element,
         container: Div,
-        viewport_width: f32,
-        responsive_styles: &[StyleRule],
-        dynamic_styles: &[StyleRule],
-        bound_style: Option<&InlineStyle>,
+        style: InlineStyle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let style = style_for_element(
-            element,
-            viewport_width,
-            self.page.mobile_breakpoint,
-            responsive_styles,
-            dynamic_styles,
-            bound_style,
-        );
         let binding = element
             .binding
             .as_ref()
@@ -419,20 +372,7 @@ impl HtmlView {
 impl Render for HtmlView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport_width = f32::from(window.viewport_size().width);
-        let responsive_styles = resolve_dynamic_styles(
-            &self.page.responsive_style_sheets,
-            viewport_width,
-            &self.snapshot,
-        );
-        let dynamic_styles =
-            resolve_dynamic_styles(&self.page.style_sheets, viewport_width, &self.snapshot);
-        let root = self.render_element(
-            &self.page.root,
-            viewport_width,
-            &responsive_styles,
-            &dynamic_styles,
-            cx,
-        );
+        let root = self.render_element(&self.page.root, viewport_width, cx);
         let view = div()
             .relative()
             .flex()
@@ -461,80 +401,6 @@ impl Render for HtmlView {
             });
         view
     }
-}
-
-fn resolve_dynamic_styles(
-    style_sheets: &[StyleSheet],
-    viewport_width: f32,
-    snapshot: &Snapshot,
-) -> Vec<StyleRule> {
-    let context = StyleContext {
-        viewport_width,
-        snapshot,
-    };
-    style_sheets
-        .iter()
-        .flat_map(|style_sheet| style_sheet(&context))
-        .collect()
-}
-
-fn style_for_element(
-    element: &Element,
-    viewport_width: f32,
-    mobile_breakpoint: Option<f32>,
-    responsive_styles: &[StyleRule],
-    dynamic_styles: &[StyleRule],
-    bound_style: Option<&InlineStyle>,
-) -> InlineStyle {
-    let mut style = element.style.clone();
-    if mobile_breakpoint.is_some_and(|breakpoint| viewport_width <= breakpoint) {
-        style.refine(&element.mobile_style);
-    }
-    for rule in responsive_styles {
-        if dynamic_selector_matches(&rule.selector, element) {
-            style.refine(&rule.style);
-        }
-    }
-    style.refine(&dynamic_style_for_element(element, dynamic_styles));
-    if let Some(bound_style) = bound_style {
-        style.refine(bound_style);
-    }
-    style.refine(&element.inline_style);
-    style
-}
-
-fn dynamic_style_for_element(element: &Element, dynamic_styles: &[StyleRule]) -> InlineStyle {
-    let mut style = InlineStyle::default();
-    for rule in dynamic_styles {
-        if dynamic_selector_matches(&rule.selector, element) {
-            style.refine(&rule.style);
-        }
-    }
-    style
-}
-
-fn dynamic_selector_matches(selector: &str, element: &Element) -> bool {
-    selector.split(',').any(|selector| {
-        let selector = selector.trim();
-        if let Some(class) = selector.strip_prefix('.') {
-            return element
-                .attr("class")
-                .is_some_and(|classes| classes.split_whitespace().any(|name| name == class));
-        }
-        if let Some(id) = selector.strip_prefix('#') {
-            return element.attr("id") == Some(id);
-        }
-        if let Some((tag, class)) = selector.split_once('.') {
-            return element.tag == tag
-                && element
-                    .attr("class")
-                    .is_some_and(|classes| classes.split_whitespace().any(|name| name == class));
-        }
-        if let Some((tag, id)) = selector.split_once('#') {
-            return element.tag == tag && element.attr("id") == Some(id);
-        }
-        element.tag == selector
-    })
 }
 
 fn display_value(
