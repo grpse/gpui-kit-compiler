@@ -1,6 +1,6 @@
-# GPUI RSC and Coffee / Lab
+# GPUI RSX and Coffee / Lab
 
-`gpui-rsc` compiles single-file Rust components into a GPUI Kit desktop app. The coffee example lives in [`examples/coffee`](examples/coffee). Its recipe calculations and output formatting live in the `<script>` section of `app.rsc`; the extraction gallery has a separate component for V60, French press, AeroPress, and espresso.
+`gpui-rsc` compiles Rust component functions with embedded markup into a GPUI Kit desktop app. The coffee app and its recipe calculations live in [`examples/coffee/app.rsx`](examples/coffee/app.rsx).
 
 ## Build and run
 
@@ -12,55 +12,115 @@ cargo run -- dev examples/coffee         # watch sources, rebuild, relaunch
 cargo run --features debug-fps -- run examples/coffee
 ```
 
-The component directory argument is required and may point anywhere on the filesystem. It must contain `app.rsc`, the root component, and may contain child `.rsc` files. The CLI generates the Cargo manifest, `main.rs`, module glue, and `*.inter.rs` files under `target/rsc-build/<directory-name>/`. The generated app has exactly two direct dependencies: `gpui` and `gpui-kit`. The compiler depends on `scraper` and emits GPUI code without linking GPUI itself.
+The component directory must contain `app.rsx` and may contain other `.rsx` component modules. The CLI generates the Cargo manifest, `main.rs`, module glue, and `*.inter.rs` files under `target/rsc-build/<directory-name>/`. The generated app has exactly two direct dependencies: `gpui` and `gpui-kit`. The compiler depends on `scraper` and emits GPUI code without linking GPUI itself.
 
 On Linux, GPUI needs Wayland or X11 plus its native graphics and windowing libraries; see the [GPUI Kit installation guide](https://gpui-kit.com/docs/installation/).
 
-## Component format
+## Component functions
 
-Each `.rsc` starts with a `<script>` block containing ordinary Rust code, followed by HTML and an optional component-local `<style>` block. The closing `</script>` goes on its own line. Rust in the script is copied into the generated `.inter.rs` file and compiled by `rustc`.
+An `.rsx` file is Rust source. Each exported `pub fn` whose body contains markup declares a component, and one file can export multiple components. Rust imports, helper functions, constants, and types remain ordinary Rust. The compiler extracts each component’s markup and emits its GPUI renderer and component definition into that module’s `.inter.rs` file. Components need no `<html>`, `<body>`, `<script>`, or `<template>` wrappers.
 
-```html
-<script>
-use gpui_rsc::{component, in_out_param, out_param};
-use gpui_rsc::runtime::Definition;
-
-pub fn definition() -> Definition {
-    component! {
-        name: "coffee-variables-form",
-        imports: [],
-        bindings: [in_out_param!("dose"), out_param!("reset")],
-    }
+```rust
+pub fn CoffeeCup(water: f32) -> gpui::AnyElement {
+    let myStyles = styles({
+        cup: { display: "flex", flexDirection: "column", width: gpui::Length::Percent(1.0) },
+        coffee: { backgroundColor: rgba(0.42, 0.25, 0.14), height: gpui::Length::Percent(0.6) }
+    });
+    <div class={myStyles.cup}>
+        <div class={myStyles.coffee}></div>
+        <output>{water}</output>
+    </div>
 }
-</script>
-<!doctype html>
-<html><body>
-  <output data-in="dose"></output>
-  <input type="range" min="8" max="40" step="1" value="20" data-in-out="dose">
-  <button data-out="reset">Reset</button>
-</body></html>
 ```
 
-A component script declares `definition() -> Definition`. The root `app.rsc` supplies a `calculate` callback, which the generated app runs on a worker thread when values change. It can also supply an `on_change` callback to adjust inputs before recalculation. Other Rust functions, types, methods, and imports can live in any component script. The [coffee calculation and recipe solver](examples/coffee/app.rsc) are examples.
+Function parameters are the component’s inputs. Immutable parameters are read-only; `&mut` parameters are two-way inputs; `#[out] action: ()` declares an output action. Matching markup attributes pass values into those named parameters, and generated render code exposes each readable value under the same parameter name. Events update the owning component entity, which re-renders when an input changes. Declare component styles in a Rust `styles({...})` bundle and bind each element with `class={myStyles.name}`.
 
-A parent imports a child in its script and instantiates it with `<component name="coffee-profile" acidity="[acidity]" ... />`. `data-in` means UI read-only, `data-out` invokes or writes to Rust, and `data-in-out` is two-way. `in_param!`, `out_param!`, and `in_out_param!` declare a child component's public parameters. Root bindings can point to application keys or Rust getter and setter closures. The compiler's build command validates names, parameters, and binding directions before launch.
+Compose components by importing their exported function names with an ordinary Rust `use`, then writing the uppercase name as a self-closing markup tag:
 
-The compiler uses `scraper` to read the HTML and match CSS selectors. The generated `.inter.rs` files define component structs and GPUI render functions. Each matched CSS declaration becomes a GPUI builder call in its element's render function, including conditional calls for `@media (max-width: ...px)`. Ordinary child elements and text are composed directly in those generated functions. The app does not parse HTML or CSS. Component-local `<style>` blocks support flex layout, spacing, colors, fonts, borders, dimensions, positioning, alignment, and scrolling. `@keyframes` with `from` and `to` stops can animate `top`, `bottom`, and `opacity` through `animation: name 1200ms infinite`. Inline `style` declarations take precedence over stylesheet and dynamic rules. Responsive GPUI styles receive the live viewport width, so resizing the desktop window previews the narrow layout.
+```rust
+use crate::generated::coffee_cup::CoffeeCup;
 
-Templates support bound text such as `{data.label}` and conditional branches with simple string equality, such as `{if method == "French press" { ... } else { ... }}`. The compiler translates these into GPUI bindings and render branches. The same conditional can be assigned in `<script>` as a `TemplateElement`, then supplied with `Definition::with_template`. Select options can be assigned in `<script>` or mapped inline in the select, for example `<select id="method">{methods.iter().map(|&method| => <option value={method}>{method}</option>)}</select>`. The compiler translates each option into a value and label and connects the choices by select id. `Definition::with_select_options` is also available for direct Rust configuration. The [extraction gallery](examples/coffee/extraction-previews.rsc) uses a bound method value to render only the selected brewing-method component. Its select event updates the value and triggers a rerender. Each scene is HTML and CSS, and its script computes coffee tint and liquid height from recipe values. A component script can provide an output formatter with `Definition::with_output_formatter`; without one, outputs use `Value::text()`.
+pub fn Recipe(water: f32) -> gpui::AnyElement {
+    let myStyles = styles({ recipe: { display: "flex", flexDirection: "column", gap: 12.0 } });
+    <div class={myStyles.recipe}>
+        <CoffeeCup water={water} />
+    </div>
+}
+```
 
-For state dependent styles, bind a GPUI `StyleRefinement` to the element with `class={styles.cup_fill}`. The component script can define `fn styles(context: &StyleContext<'_>) -> Styles`, where `Styles` contains `Style` fields. `Style` is GPUI's style refinement type; the compiler lowers the existing `Style::new()` builder expressions to GPUI `div()` style builders while compiling the generated Rust. The generated render function evaluates the bound expression against the current snapshot and refines the element's GPUI style directly. A direct expression also works, such as `class={Style::new().background_color(color_for(context))}`. Static `class="..."` and a bound `class={...}` may appear on the same element. The [method previews](examples/coffee/extraction-previews.rsc) use this pattern to change coffee tint and liquid height from recipe values. There is no runtime CSS selector or style-operation resolver.
+The compiler resolves each uppercase tag to its imported function, validates the supplied properties against the function parameters, and adds the child definition to the parent. Rust expressions in properties use braces, for example `value={recipe.water}`. Import the component under the same name used by its markup tag.
 
-The seven flavor sliders show the predicted scores and can also be dragged. Moving one runs the solver in `app.rsc`, which searches recipe quantities and brewing choices for a closer score. The recipe controls and flavor sliders update the four method scenes; the coffee tint follows predicted intensity, bitterness, and body, while the liquid height follows the recipe water amount. Some scores cannot be reached exactly. Calculation changes are sent from the worker as events and update the GPUI view. The optional `debug-fps` build feature adds a small FPS overlay and requests continuous frames while measuring. The desktop window uses a GPUI Kit title bar with standard minimize, maximize, and close controls.
+Templates support Rust interpolations such as `{water}` and conditional branches such as `{if method == "French press" { <FrenchPress /> } else { <V60 /> }}`. Select options can be generated by a Rust iterator directly inside markup:
+
+```rust
+const METHODS: [&str; 2] = ["V60", "French press"];
+
+pub fn MethodSelect(method: &mut String) -> gpui::AnyElement {
+    let methods = ["V60", "French press"];
+    let options = methods.iter().map(|&value| => <option value=[value]>{value}</option>);
+    <select id="method" data-in-out="method">
+        {options}
+    </select>
+}
+```
+
+`<div>` is the generic GPUI element; `<button>`, range `<input>`, `<select>` with `<option>` values, `<output>`, and imported uppercase component functions lower to GPUI Kit controls or component entities. Unsupported markup elements and style declarations are reported during compilation. Component styles support flex layout, spacing, colors, fonts, borders, dimensions, positioning, alignment, opacity, overflow, and scrolling. Responsive values can use `context.viewport_width` inside the component’s `styles({...})` bundle.
+
+Build scoped styles with the Rust `styles({ ... })` expression. Each named style is a struct field, and properties use camelCase names that lower to GPUI style refinements. Colors accept `rgba(r, g, b)` or `rgba(r, g, b, a)` with normalized channels. Style values can use component parameters directly or pass them to Rust helpers:
+
+```rust
+fn liquid_level(water: f32) -> f32 {
+    (0.24 + ((water - 100.0) / 500.0).clamp(0.0, 1.0) * 0.62).clamp(0.2, 0.88)
+}
+
+pub fn Preview(water: f32) -> gpui::AnyElement {
+    let myStyles = styles({
+        liquid: {
+            backgroundColor: rgba(1.0, 0.35, 0.12),
+            height: gpui::Length::Percent(liquid_level(water))
+        }
+    });
+    <div class={myStyles.liquid}></div>
+}
+```
+
+The compiler evaluates the style bundle in generated element render functions, with named locals sourced from the component’s attributes. The coffee previews use this pattern to tint the coffee and adjust the liquid height from recipe values.
+
+Style bundle properties cover the compiler’s supported GPUI style set: display and flex layout, gaps, padding, colors, font size and weight, borders and corner radius, width and height constraints, automatic margins, justification and alignment, position and offsets, overflow, and opacity. Use Rust tuples for shorthands such as `padding: (top, right, bottom, left)` and `border: (width, color)`. Style values are Rust expressions, so responsive values and helper calls can be written directly in the component function.
+
+The coffee app shows a recipe, cup prediction, and action tabs alongside method-specific coffee drawings. Changing recipe inputs updates the owning views through events. The scores are relative estimates; coffee origin, roast, water chemistry, and tasting feedback are not modeled. The optional `debug-fps` build feature adds an FPS overlay and requests continuous frames while measuring.
+
+The Cursor extension associates `.rsx` with Rust-aware markup highlighting, completions for GPUI elements, component tags, bindings, and style declarations, and nested markup indentation formatting. Run **Format Document** to align markup tags with the document's indentation settings.
+
+## Application startup
+
+Place an optional `gpui-rsc.toml` beside `app.rsx` to configure the application's initial GPUI window. The compiler reads it during generation; with no file, the window keeps the default 1240×870 windowed size.
+
+```toml
+[window]
+width = 1440
+height = 960
+min_width = 900
+min_height = 640
+state = "windowed" # windowed, maximized, or fullscreen
+decorations = "client" # client or server
+resizable = true
+minimizable = true
+movable = true
+focus = true
+show = true
+```
+
+`width` and `height` set the initial and restore size. `min_width` and `min_height` are optional, but must be set together because GPUI accepts minimum size as a pair. Invalid keys or values are reported with the config file path during compilation. The window options correspond to GPUI's startup bounds, minimum size, decorations, and focus/show/move/resize controls.
 
 ## Library layout
 
-- [`src/lib.rs`](src/lib.rs): `.rsc` parser and GPUI code generator.
+- [`src/lib.rs`](src/lib.rs): `.rsx` parser and GPUI code generator.
 - [`src/template.rs`](src/template.rs): generated template types.
 - [`src/main.rs`](src/main.rs): compiler CLI and development watcher.
 - [`src/runtime`](src/runtime): GPUI Kit controls, scoped bindings, and worker state copied into generated apps.
-- [`examples/coffee/app.rsc`](examples/coffee/app.rsc): coffee recipe bindings and heuristic sensory calculations.
-- [`examples/coffee/extraction-previews.rsc`](examples/coffee/extraction-previews.rsc): full-width gallery composing the four method previews.
-- [`examples/coffee/v60-preview.rsc`](examples/coffee/v60-preview.rsc), [`examples/coffee/french-press-preview.rsc`](examples/coffee/french-press-preview.rsc), [`examples/coffee/aeropress-preview.rsc`](examples/coffee/aeropress-preview.rsc), [`examples/coffee/espresso-preview.rsc`](examples/coffee/espresso-preview.rsc): method-specific coffee containers and dynamic fill styles.
+- [`examples/coffee/app.rsx`](examples/coffee/app.rsx): coffee recipe bindings and heuristic sensory calculations.
+- [`examples/coffee/extraction-previews.rsx`](examples/coffee/extraction-previews.rsx): exports both the method gallery and V60 preview; it also composes the French press, AeroPress, and espresso preview modules.
+- [`examples/coffee/french-press-preview.rsx`](examples/coffee/french-press-preview.rsx), [`examples/coffee/aeropress-preview.rsx`](examples/coffee/aeropress-preview.rsx), [`examples/coffee/espresso-preview.rsx`](examples/coffee/espresso-preview.rsx): method-specific coffee containers and dynamic fill styles.
 
 The coffee scores are relative recipe estimates; coffee origin, roast, water chemistry, and tasting feedback are not modeled.

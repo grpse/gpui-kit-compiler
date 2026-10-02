@@ -1,25 +1,29 @@
 {
   "name": "gpui-rsc-syntax",
-  "displayName": "GPUI RSC Syntax",
-  "description": "HTML and Rust syntax coloring for .rsc components.",
-  "version": "0.1.0",
+  "displayName": "GPUI RSX Syntax",
+  "description": "Rust-aware syntax highlighting, GPUI completions, and markup formatting for .rsx components.",
+  "version": "0.2.0",
   "publisher": "local",
+  "main": "./extension.js",
   "engines": {
     "vscode": ">=1.85.0"
   },
   "categories": [
     "Programming Languages"
   ],
+  "activationEvents": [
+    "onLanguage:gpui-rsc"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "gpui-rsc",
         "aliases": [
-          "GPUI RSC",
-          "rsc"
+          "GPUI RSX",
+          "rsx"
         ],
         "extensions": [
-          ".rsc"
+          ".rsx"
         ]
       }
     ],
@@ -27,8 +31,21 @@
       {
         "language": "gpui-rsc",
         "scopeName": "source.gpui-rsc",
-        "path": "./syntaxes/gpui-rsc.tmLanguage.json"
+        "path": "./syntaxes/gpui-rsc.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.rust": "rust"
+        }
       }
-    ]
+    ],
+    "configuration": {
+      "title": "GPUI RSC",
+      "properties": {
+        "gpuiRsc.completions.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest GPUI RSC elements, bindings, and supported style properties."
+        }
+      }
+    }
   }
 }

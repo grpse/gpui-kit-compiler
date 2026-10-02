@@ -1,8 +1,18 @@
 use crate::runtime;
 pub type RenderFn = fn(
-    &runtime::view::HtmlView,
+    &mut runtime::view::HtmlView,
     &runtime::binding::Element,
+    &runtime::ComponentProps,
     f32,
+    &mut gpui::Window,
+    &mut gpui::Context<runtime::view::HtmlView>,
+) -> gpui::AnyElement;
+
+pub type ComponentRenderFn = fn(
+    &mut runtime::view::HtmlView,
+    &runtime::ComponentProps,
+    f32,
+    &mut gpui::Window,
     &mut gpui::Context<runtime::view::HtmlView>,
 ) -> gpui::AnyElement;
 

@@ -7,10 +7,11 @@ edition = "2024"
 scraper = { version = "0.24", optional = true }
 syn = { version = "2", features = ["full", "visit-mut"], optional = true }
 quote = { version = "1", optional = true }
+toml = { version = "0.8", optional = true }
 
 [features]
 default = ["compiler"]
-compiler = ["dep:scraper", "dep:syn", "dep:quote"]
+compiler = ["dep:scraper", "dep:syn", "dep:quote", "dep:toml"]
 debug-fps = []
 
 [[bin]]

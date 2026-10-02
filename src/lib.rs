@@ -1,8 +1,10 @@
 #[cfg(feature = "compiler")]
 mod style_codegen;
-// Compiler for single-file Rust components.
+// Compiler for single-file Rust JSX components.
 #[cfg(feature = "compiler")]
 use scraper::{ElementRef, Html, Node as HtmlNode, Selector};
+#[cfg(feature = "compiler")]
+use quote::ToTokens;
 #[cfg(feature = "compiler")]
 use std::{
     collections::HashMap,
@@ -12,44 +14,38 @@ use std::{
 
 #[cfg(feature = "compiler")]
 pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
-    if input.extension().and_then(|s| s.to_str()) != Some("rsc") {
-        return Err(format!("{} is not .rsc", input.display()));
+    if input.extension().and_then(|s| s.to_str()) != Some("rsx") {
+        return Err(format!("{} is not .rsx", input.display()));
     }
     let source = fs::read_to_string(input).map_err(|e| e.to_string())?;
-    let source = source.trim_start();
-    let script_start = source
-        .strip_prefix("<script>")
-        .ok_or_else(|| format!("{} must start with <script>", input.display()))?;
-    // Treat the closing tag as a whole line so Rust strings containing
-    // `</script>` are copied unchanged.
-    let close = script_start
-        .match_indices("</script>")
-        .find(|(index, tag)| {
-            let before = &script_start[..*index];
-            let after = &script_start[*index + tag.len()..];
-            before.rsplit('\n').next().unwrap_or("").trim().is_empty()
-                && after.split('\n').next().unwrap_or("").trim().is_empty()
-        })
-        .map(|(index, _)| index)
-        .ok_or_else(|| format!("{} needs </script> on its own line", input.display()))?;
-    let (script, html) = (
-        &script_start[..close],
-        &script_start[close + "</script>".len()..],
-    );
-    if html.trim().is_empty() {
-        return Err(format!("{} has no HTML", input.display()));
+    if !source.contains("<script>") {
+        if let Some((script, components)) = rust_component_functions(&source, input)? {
+            return compile_rust_components(input, output, &script, &components);
+        }
     }
-    let (html, select_option_refs) = extract_select_option_refs(html)?;
-    let html = expand_template_expressions(&html)?;
-    let html = expand_template_interpolations(&html)?;
-    let html = normalize_component_tags(&html)?;
-    let (html, mut class_bindings) = extract_class_bindings(&html)?;
-    let document = Html::parse_document(&html);
-    let (stylesheet, keyframes) = component_styles(&document, input)?;
+    let sections = component_sections(&source, input)?;
+    let (template, select_option_refs) = extract_select_option_refs(&sections.template)?;
+    let template = expand_template_expressions(&template)?;
+    let template = expand_template_interpolations(&template)?;
+    let component_functions = component_function_tags(&template)?;
+    let template = normalize_component_tags(&template)?;
+    let (template, mut class_bindings) = extract_class_bindings(&template)?;
+    let document_source = ensure_html_document(&template);
+    let document = Html::parse_document(&document_source);
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or("invalid filename")?;
+    let component_function = component_function_name(stem);
+    let imports = component_functions
+        .iter()
+        .map(|name| format!("{name}()"))
+        .collect::<Vec<_>>();
+    let definition_expression = if imports.is_empty() {
+        "definition()".to_owned()
+    } else {
+        format!("definition().with_imports(vec![{}])", imports.join(", "))
+    };
     let body = document
         .select(&Selector::parse("body").unwrap())
         .next()
@@ -58,53 +54,51 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     let mut next_style_id = 0;
     let tree = element_code(
         body,
-        &stylesheet,
-        &keyframes,
         &class_bindings,
+        &HashMap::new(),
+        "",
         &mut next_style_id,
         &mut gpui_functions,
     )?;
-    let script = expand_script_option_mappings(script)?;
+    let script = expand_script_option_mappings(&sections.script)?;
     let script = expand_script_template_expressions(
         &script,
-        &stylesheet,
-        &keyframes,
         &mut class_bindings,
         &mut next_style_id,
         &mut gpui_functions,
     )?;
     let script = inject_select_options(&script, &select_option_refs)?;
-    let title = document
-        .select(&Selector::parse("title").unwrap())
-        .next()
-        .map(|element| element.text().collect::<String>())
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| stem.to_owned());
-    let struct_name = format!(
-        "{}Component",
-        stem.split('-')
-            .map(|word| {
-                let mut chars = word.chars();
-                match chars.next() {
-                    Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
-                    None => String::new(),
-                }
-            })
-            .collect::<String>()
+    let struct_name = format!("{}Component", component_function_name(stem));
+    let view_inputs = component_view_inputs(&sections.script);
+    let view_inputs_fn = format!(
+        "#[allow(dead_code)]\nfn __rsc_generated_view_inputs() -> &'static [&'static str] {{ &[{}] }}\n",
+        view_inputs
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
+    let default_title = if script.contains("fn title(") {
+        String::new()
+    } else {
+        format!("pub fn title() -> &'static str {{ {stem:?} }}\n")
+    };
     // Script is inserted verbatim. It can contain any Rust items, functions, and methods.
     let generated = format!(
-        "// Generated Rust source from {}.\n{}\n{}\npub struct {};\nimpl gpui_rsc::CompiledComponent for {} {{\n    fn template() -> gpui_rsc::TemplateElement {{ {} }}\n}}\nimpl {} {{\n    pub fn definition() -> gpui_rsc::runtime::Definition {{ {} }}\n    pub fn template() -> gpui_rsc::TemplateElement {{ <Self as gpui_rsc::CompiledComponent>::template() }}\n}}\npub fn template() -> gpui_rsc::TemplateElement {{ {}::template() }}\npub fn title() -> &'static str {{ {:?} }}\n",
+        "// Generated Rust source from {}.\n{}\n{}\n{}\n{}\npub struct {};\nimpl gpui_rsc::CompiledComponent for {} {{\n    fn template() -> gpui_rsc::TemplateElement {{ {} }}\n}}\nimpl {} {{\n    pub fn definition() -> gpui_rsc::runtime::Definition {{ {} }}\n    pub fn template() -> gpui_rsc::TemplateElement {{ <Self as gpui_rsc::CompiledComponent>::template() }}\n}}\npub fn template() -> gpui_rsc::TemplateElement {{ {}::template() }}\n#[allow(non_snake_case)]\npub fn {}() -> gpui_rsc::runtime::Definition {{ {}::definition() }}\n#[allow(unused_variables)]\npub fn __rsc_render_component(view: &mut gpui_rsc::runtime::view::HtmlView, props: &gpui_rsc::runtime::ComponentProps, viewport_width: f32, window: &mut gpui::Window, cx: &mut gpui::Context<gpui_rsc::runtime::view::HtmlView>) -> gpui::AnyElement {{ view.render_root(props, viewport_width, window, cx) }}\n",
         input.display(),
         script,
+        default_title,
+        view_inputs_fn,
         gpui_functions.join("\n"),
         struct_name,
         struct_name,
         tree,
         struct_name,
-        "definition()",
+        definition_expression,
         struct_name,
-        title
+        component_function,
+        struct_name,
     );
     let generated = style_codegen::translate(&generated)?;
     if let Some(parent) = output.parent() {
@@ -117,16 +111,639 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
 }
 
 #[cfg(feature = "compiler")]
+struct RustComponentFunction {
+    name: String,
+    inputs: Vec<RustComponentInput>,
+    prelude: String,
+    template: String,
+}
+
+#[cfg(feature = "compiler")]
+struct RustComponentInput {
+    name: String,
+    ty: String,
+    mutable: bool,
+    direction: &'static str,
+}
+
+#[cfg(feature = "compiler")]
+fn rust_component_functions(
+    source: &str,
+    input: &Path,
+) -> Result<Option<(String, Vec<RustComponentFunction>)>, String> {
+    let source = source.to_owned();
+    let mut components = Vec::new();
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("pub fn ") {
+        let start = cursor + relative;
+        let Some(args_open_rel) = source[start..].find('(') else {
+            break;
+        };
+        let args_open = start + args_open_rel;
+        let args_close = matching_delimiter(&source, args_open, b'(', b')').ok_or_else(|| {
+            format!(
+                "{} has an unclosed function parameter list",
+                input.display()
+            )
+        })?;
+        let Some(body_open_rel) = source[args_close + 1..].find('{') else {
+            break;
+        };
+        let body_open = args_close + 1 + body_open_rel;
+        let body_close = rust_brace_end(&source, body_open).map_err(|error| {
+            format!(
+                "{} has an invalid component function: {error}",
+                input.display()
+            )
+        })?;
+        let body = &source[body_open + 1..body_close];
+        let Some(markup_start) = find_component_markup_start(body) else {
+            cursor = body_close + 1;
+            continue;
+        };
+        let header = format!("{}{{}}", &source[start..body_open]);
+        let item = syn::parse_str::<syn::ItemFn>(&header).map_err(|error| {
+            format!(
+                "{} has an invalid component function signature: {error}",
+                input.display()
+            )
+        })?;
+        let mut inputs = Vec::new();
+        for argument in &item.sig.inputs {
+            let syn::FnArg::Typed(argument) = argument else {
+                return Err("component functions cannot use a `self` parameter".into());
+            };
+            let syn::Pat::Ident(name) = argument.pat.as_ref() else {
+                return Err("component function inputs must be named parameters".into());
+            };
+            let direction = if argument
+                .attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("out"))
+            {
+                "out_param"
+            } else if matches!(argument.ty.as_ref(), syn::Type::Reference(reference) if reference.mutability.is_some())
+            {
+                "in_out_param"
+            } else {
+                "in_param"
+            };
+            inputs.push(RustComponentInput {
+                name: name.ident.to_string(),
+                ty: argument.ty.to_token_stream().to_string(),
+                mutable: name.mutability.is_some()
+                    || matches!(argument.ty.as_ref(), syn::Type::Reference(reference) if reference.mutability.is_some()),
+                direction,
+            });
+        }
+        components.push(RustComponentFunction {
+            name: item.sig.ident.to_string(),
+            inputs,
+            prelude: body[..markup_start].trim().to_owned(),
+            template: body[markup_start..].to_owned(),
+        });
+        spans.push((start, body_close + 1));
+        cursor = body_close + 1;
+    }
+    if components.is_empty() {
+        return Ok(None);
+    }
+    let mut script = String::with_capacity(source.len());
+    cursor = 0;
+    for (start, end) in spans {
+        script.push_str(&source[cursor..start]);
+        script.push('\n');
+        cursor = end;
+    }
+    script.push_str(&source[cursor..]);
+    Ok(Some((script, components)))
+}
+
+#[cfg(feature = "compiler")]
+fn find_component_markup_start(source: &str) -> Option<usize> {
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if character == '"' {
+            quote = Some(character);
+            continue;
+        }
+        if parens == 0 && brackets == 0 && braces == 0 {
+            let rest = &source[index..];
+            if (character == '<' && rest.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic))
+                || rest.starts_with("{if ")
+            {
+                return Some(index);
+            }
+        }
+        match character {
+            '(' => parens += 1,
+            ')' => parens = parens.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(feature = "compiler")]
+fn matching_delimiter(source: &str, open: usize, left: u8, right: u8) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (relative, character) in source[open..].char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if character == '"'
+            || (character == '\''
+                && source[open + relative + 1..]
+                    .chars()
+                    .nth(1)
+                    .is_some_and(|next| next == '\''))
+        {
+            quote = Some(character);
+        } else if character as u32 == left as u32 {
+            depth += 1;
+        } else if character as u32 == right as u32 {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(open + relative);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(feature = "compiler")]
+fn compile_rust_components(
+    input: &Path,
+    output: &Path,
+    script: &str,
+    components: &[RustComponentFunction],
+) -> Result<(), String> {
+    let mut generated_components = Vec::new();
+    let has_custom_definition = script.contains("fn definition(");
+    let root_component = components.iter().find(|component| component.name == "App");
+    let root_helpers = if has_custom_definition && root_component.is_some() {
+        let title = if script.contains("fn title(") {
+            String::new()
+        } else {
+            format!(
+                "fn title() -> &'static str {{ {:?} }}\n",
+                input.file_stem().unwrap().to_string_lossy()
+            )
+        };
+        let template = if script.contains("fn template(") {
+            String::new()
+        } else {
+            "fn template() -> gpui_rsc::TemplateElement { <AppComponent as gpui_rsc::CompiledComponent>::template() }\n".to_owned()
+        };
+        let view_inputs = component_view_inputs(script)
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{title}{template}fn __rsc_generated_view_inputs() -> &'static [&'static str] {{ &[{view_inputs}] }}\n"
+        )
+    } else {
+        String::new()
+    };
+    let mut next_style_id = 0;
+
+    for component in components {
+        let component_template = component.template.as_str();
+        let (template, select_option_refs) = extract_select_option_refs(&component_template)?;
+        let prelude = expand_rust_style_bundles(&component.prelude)?;
+        let prelude = expand_script_option_mappings(&prelude)?;
+        let template = expand_template_expressions(&template)?;
+        let template = expand_template_interpolations(&template)?;
+        let component_functions = component_function_tags(&template)?;
+        let template = normalize_component_tags(&template)?;
+        let (template, class_bindings) = extract_class_bindings(&template)?;
+        let (prelude, style_variables) =
+            extract_style_variables(&prelude, class_bindings.values())?;
+        let document = Html::parse_document(&ensure_html_document(&template));
+        let body = document
+            .select(&Selector::parse("body").unwrap())
+            .next()
+            .ok_or_else(|| format!("{}: component needs markup", input.display()))?;
+        let input_locals = component_input_locals(&component.inputs)?;
+        let mut gpui_functions = Vec::new();
+        let tree = element_code(
+            body,
+            &class_bindings,
+            &style_variables,
+            &input_locals,
+            &mut next_style_id,
+            &mut gpui_functions,
+        )?;
+        let name = component_tag_stem(&component.name);
+        let struct_name = format!("{}Component", component.name);
+        let imports = component_functions
+            .iter()
+            .map(|name| format!("{name}()"))
+            .collect::<Vec<_>>();
+        let view_inputs = component
+            .inputs
+            .iter()
+            .filter(|input| input.direction != "out_param")
+            .map(|input| format!("{:?}", input.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let definition = if component.name == "App" && has_custom_definition {
+            "definition()".to_owned()
+        } else {
+            let bindings = component
+                .inputs
+                .iter()
+                .map(|input| format!("gpui_rsc::{}!({:?})", input.direction, input.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "gpui_rsc::runtime::Definition::new({name:?}, {name:?}, <{struct_name} as gpui_rsc::CompiledComponent>::template(), vec![{bindings}], __rsc_render_component)"
+            )
+        };
+        let inputs_fn = format!("__{}_view_inputs", component.name);
+        let definition = format!("({definition}).with_view_inputs({inputs_fn}())");
+        let definition = if imports.is_empty() {
+            definition
+        } else {
+            format!("({definition}).with_imports(vec![{}])", imports.join(", "))
+        };
+        let definition = select_option_refs
+            .iter()
+            .fold(definition, |definition, (id, options)| {
+                format!("({definition}).with_select_options({id:?}, {options})")
+            });
+        generated_components.push(format!(
+            "pub struct {struct_name};\nimpl gpui_rsc::CompiledComponent for {struct_name} {{ fn template() -> gpui_rsc::TemplateElement {{ {tree} }} }}\nimpl {struct_name} {{ pub fn definition() -> gpui_rsc::runtime::Definition {{ {prelude} {definition} }} }}\n#[allow(non_snake_case)] pub fn {}() -> gpui_rsc::runtime::Definition {{ {struct_name}::definition() }}\n#[allow(dead_code, non_snake_case)] fn __{}_view_inputs() -> &'static [&'static str] {{ &[{view_inputs}] }}\n{}",
+            component.name,
+            component.name,
+            gpui_functions.join("\n"),
+        ));
+    }
+
+    let generated = format!(
+        "// Generated Rust component functions from {}.\n{}\n{}\n{}\n{}\n#[allow(unused_variables)] pub fn __rsc_render_component(view: &mut gpui_rsc::runtime::view::HtmlView, props: &gpui_rsc::runtime::ComponentProps, viewport_width: f32, window: &mut gpui::Window, cx: &mut gpui::Context<gpui_rsc::runtime::view::HtmlView>) -> gpui::AnyElement {{ view.render_root(props, viewport_width, window, cx) }}\n",
+        input.display(),
+        script,
+        generated_components.join("\n"),
+        root_helpers,
+        "",
+    );
+    let generated = style_codegen::translate(&generated)?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    if fs::read_to_string(output).ok().as_deref() != Some(&generated) {
+        fs::write(output, generated).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "compiler")]
+fn component_input_locals(inputs: &[RustComponentInput]) -> Result<String, String> {
+    let mut locals = String::new();
+    for input in inputs {
+        if input.direction == "out_param" {
+            continue;
+        }
+        let ty = syn::parse_str::<syn::Type>(&input.ty)
+            .map_err(|error| format!("invalid type for component parameter {}: {error}", input.name))?;
+        let (value_ty, by_reference) = match &ty {
+            syn::Type::Reference(reference) => (reference.elem.as_ref(), true),
+            other => (other, false),
+        };
+        let syn::Type::Path(path) = value_ty else {
+            return Err(format!(
+                "component parameter {} has unsupported type {}",
+                input.name, input.ty
+            ));
+        };
+        let Some(type_name) = path.path.segments.last().map(|segment| segment.ident.to_string()) else {
+            return Err(format!(
+                "component parameter {} has unsupported type {}",
+                input.name, input.ty
+            ));
+        };
+        let mutable = if input.mutable { "mut " } else { "" };
+        let key = format!("{:?}", input.name);
+        let declaration = match type_name.as_str() {
+            "f32" => format!(
+                "let {mutable}{}: f32 = props.get({key}).and_then(|value| value.number()).unwrap_or_default();\n",
+                input.name
+            ),
+            "f64" | "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32"
+            | "u64" | "usize" => format!(
+                "let {mutable}{}: {type_name} = props.get({key}).and_then(|value| value.number()).map(|value| value as {type_name}).unwrap_or_default();\n",
+                input.name
+            ),
+            "str" if by_reference => format!(
+                "let {}: &str = props.get({key}).and_then(|value| match value {{ gpui_rsc::runtime::Value::Text(text) => Some(text.as_str()), _ => None }}).unwrap_or(\"\");\n",
+                input.name
+            ),
+            "String" => format!(
+                "let {mutable}{}: String = props.get({key}).and_then(|value| match value {{ gpui_rsc::runtime::Value::Text(text) => Some(text.clone()), _ => None }}).unwrap_or_default();\n",
+                input.name
+            ),
+            "bool" => format!(
+                "let {mutable}{}: bool = props.get({key}).and_then(|value| match value {{ gpui_rsc::runtime::Value::Text(text) => Some(text == \"true\"), gpui_rsc::runtime::Value::Number(number) => Some(*number != 0.0), gpui_rsc::runtime::Value::Arguments(_) => None }}).unwrap_or_default();\n",
+                input.name
+            ),
+            "Value" if !by_reference => format!(
+                "let {mutable}{} = props.get({key}).cloned().unwrap_or_else(|| gpui_rsc::runtime::Value::Text(String::new()));\n",
+                input.name
+            ),
+            _ => {
+                return Err(format!(
+                    "component parameter {} has unsupported attribute input type {}",
+                    input.name, input.ty
+                ));
+            }
+        };
+        locals.push_str(&declaration);
+    }
+    Ok(locals)
+}
+
+#[cfg(feature = "compiler")]
+fn component_function_name(stem: &str) -> String {
+    stem.split(['-', '_'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => format!("{}{}", c.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "compiler")]
+struct ComponentSections {
+    script: String,
+    template: String,
+}
+
+#[cfg(feature = "compiler")]
+fn component_view_inputs(script: &str) -> Vec<String> {
+    if !script.contains("StyleContext") {
+        return Vec::new();
+    }
+    let Some(component_start) = script.find("component!") else {
+        return Vec::new();
+    };
+    let component = &script[component_start..];
+    let Some(bindings_offset) = component.find("bindings") else {
+        return Vec::new();
+    };
+    let Some(open_relative) = component[bindings_offset..].find('[') else {
+        return Vec::new();
+    };
+    let open = bindings_offset + open_relative;
+    let Some(close) = matching_square_bracket(component, open) else {
+        return Vec::new();
+    };
+    let binding_block = &component[open + 1..close];
+    let mut parameter_names = Vec::new();
+    let mut cursor = 0;
+    let markers = [
+        "in_out_binding!",
+        "in_out_param!",
+        "in_binding!",
+        "in_param!",
+    ];
+    while cursor < binding_block.len() {
+        let Some((offset, marker)) = markers
+            .iter()
+            .filter_map(|marker| {
+                binding_block[cursor..]
+                    .find(marker)
+                    .map(|offset| (cursor + offset, *marker))
+            })
+            .min_by_key(|(offset, _)| *offset)
+        else {
+            break;
+        };
+        let after_marker = offset + marker.len();
+        let Some(quote_offset) = binding_block[after_marker..].find('"') else {
+            break;
+        };
+        let value_start = after_marker + quote_offset + 1;
+        let Some(value_end) = binding_block[value_start..].find('"') else {
+            break;
+        };
+        let name = &binding_block[value_start..value_start + value_end];
+        if !parameter_names.iter().any(|parameter| parameter == name) {
+            parameter_names.push(name.to_owned());
+        }
+        cursor = value_start + value_end + 1;
+    }
+    if parameter_names.is_empty() {
+        return Vec::new();
+    }
+
+    let script_without_bindings = format!(
+        "{}{}",
+        &script[..component_start + open],
+        &script[component_start + close + 1..]
+    );
+    let style_code = component_style_code(&script_without_bindings);
+    let mut inputs = parameter_names
+        .into_iter()
+        .filter(|name| script_contains_string(&style_code, name))
+        .collect::<Vec<_>>();
+    inputs.sort();
+    inputs
+}
+
+#[cfg(feature = "compiler")]
+fn component_style_code(source: &str) -> String {
+    let mut output = String::new();
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("fn ") {
+        let start = cursor + relative;
+        let Some(open_relative) = source[start..].find('{') else {
+            break;
+        };
+        let open = start + open_relative;
+        let signature = &source[start..open];
+        let Ok(close) = rust_brace_end(source, open) else {
+            cursor = open + 1;
+            continue;
+        };
+        if signature.contains("StyleContext") {
+            output.push_str(&source[start..=close]);
+        }
+        cursor = close + 1;
+    }
+    output
+}
+
+#[cfg(feature = "compiler")]
+fn matching_square_bracket(source: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (relative, character) in source[open..].char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + relative);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(feature = "compiler")]
+fn script_contains_string(source: &str, expected: &str) -> bool {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (index, character) in source.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                if &source[start..index] == expected {
+                    return true;
+                }
+                quoted = false;
+            }
+        } else if character == '"' {
+            quoted = true;
+            start = index + 1;
+        }
+    }
+    false
+}
+
+#[cfg(feature = "compiler")]
+fn component_sections(source: &str, input: &Path) -> Result<ComponentSections, String> {
+    let (script, rest) = take_component_section(source.trim_start(), "script", true)?;
+    let (template, rest) = take_component_section(&rest, "template", false)?;
+    if !rest.trim().is_empty() {
+        return Err(format!(
+            "{} has content outside <script> and <template>; component styles belong in a Rust styles(...) bundle",
+            input.display()
+        ));
+    }
+    Ok(ComponentSections {
+        script: script.ok_or_else(|| format!("{} needs a <script> section", input.display()))?,
+        template: template
+            .ok_or_else(|| format!("{} needs a <template> section", input.display()))?,
+    })
+}
+
+#[cfg(feature = "compiler")]
+fn take_component_section(
+    source: &str,
+    name: &str,
+    closing_tag_on_own_line: bool,
+) -> Result<(Option<String>, String), String> {
+    let open_tag = format!("<{name}>");
+    let close_tag = format!("</{name}>");
+    let Some(open) = source.find(&open_tag) else {
+        return Ok((None, source.to_owned()));
+    };
+    let content_start = open + open_tag.len();
+    if source[content_start..].contains(&open_tag) {
+        return Err(format!("multiple <{name}> sections are not supported"));
+    }
+    let close = source[content_start..]
+        .match_indices(&close_tag)
+        .find(|(relative, tag)| {
+            if !closing_tag_on_own_line {
+                return true;
+            }
+            let index = content_start + *relative;
+            let before = &source[..index];
+            let after = &source[index + tag.len()..];
+            before.rsplit('\n').next().unwrap_or("").trim().is_empty()
+                && after.split('\n').next().unwrap_or("").trim().is_empty()
+        })
+        .map(|(relative, _)| content_start + relative)
+        .ok_or_else(|| {
+            if closing_tag_on_own_line {
+                format!("<{name}> needs {close_tag} on its own line")
+            } else {
+                format!("<{name}> needs a closing tag")
+            }
+        })?;
+    let content = source[content_start..close].to_owned();
+    let after_close = close + close_tag.len();
+    let mut rest = String::with_capacity(source.len() - (after_close - open));
+    rest.push_str(&source[..open]);
+    rest.push_str(&source[after_close..]);
+    Ok((Some(content), rest))
+}
+
+#[cfg(feature = "compiler")]
+fn ensure_html_document(source: &str) -> String {
+    let lower = source.to_ascii_lowercase();
+    if lower.contains("<html") || lower.contains("<body") {
+        source.to_owned()
+    } else {
+        format!("<!doctype html><html><body>{source}</body></html>")
+    }
+}
+
+#[cfg(feature = "compiler")]
 pub fn compile_directory(directory: &Path, output: &Path) -> Result<Vec<PathBuf>, String> {
     let mut inputs = fs::read_dir(directory)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("rsc"))
+        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("rsx"))
         .collect::<Vec<_>>();
     inputs.sort();
     if inputs.is_empty() {
-        return Err(format!("no .rsc files in {}", directory.display()));
+        return Err(format!("no .rsx files in {}", directory.display()));
     }
     let mut outputs = Vec::new();
     for input in inputs {
@@ -279,29 +896,131 @@ fn is_simple_rust_identifier(value: &str) -> bool {
 }
 
 #[cfg(feature = "compiler")]
-fn normalize_component_tags(source: &str) -> Result<String, String> {
-    let mut out = String::new();
-    let mut rest = source;
-    while let Some(start) = rest.find("<component ") {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let end = html_tag_end(rest)?;
-        let tag = &rest[..end];
-        if tag.trim_end_matches('>').trim_end().ends_with('/') {
-            out.push_str(
-                tag.trim_end_matches('>')
-                    .trim_end()
-                    .trim_end_matches('/')
-                    .trim_end(),
-            );
-            out.push_str("></component>");
+fn component_function_tags(source: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find('<') {
+        let start = cursor + relative;
+        let name_start = start + 1;
+        let name_end = source[name_start..]
+            .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .map(|offset| name_start + offset)
+            .unwrap_or(source.len());
+        let name = &source[name_start..name_end];
+        if name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase())
+        {
+            let tag_end = html_tag_end(&source[start..])? + start;
+            let tag = &source[start..tag_end];
+            if !tag.trim_end_matches('>').trim_end().ends_with('/') {
+                return Err(format!(
+                    "<{name}> component tags must be self-closing; pass values as properties"
+                ));
+            }
+            if !names.iter().any(|existing| existing == name) {
+                names.push(name.to_owned());
+            }
+            cursor = tag_end;
         } else {
-            out.push_str(tag);
+            cursor = name_end.max(start + 1);
         }
-        rest = &rest[end..];
     }
-    out.push_str(rest);
-    Ok(out)
+    Ok(names)
+}
+
+#[cfg(feature = "compiler")]
+fn component_tag_stem(name: &str) -> String {
+    let characters = name.chars().collect::<Vec<_>>();
+    let mut stem = String::new();
+    for (index, character) in characters.iter().copied().enumerate() {
+        if character == '_' {
+            if !stem.ends_with('-') {
+                stem.push('-');
+            }
+            continue;
+        }
+        if character.is_ascii_uppercase() && index > 0 {
+            let previous = characters[index - 1];
+            let next_is_lower = characters
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_lowercase());
+            if (previous.is_ascii_lowercase() || previous.is_ascii_digit())
+                || (previous.is_ascii_uppercase() && next_is_lower)
+            {
+                stem.push('-');
+            }
+        }
+        stem.push(character.to_ascii_lowercase());
+    }
+    stem
+}
+
+#[cfg(feature = "compiler")]
+fn normalize_component_tags(source: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find('<') {
+        let start = cursor + relative;
+        let name_start = start + 1;
+        let name_end = source[name_start..]
+            .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .map(|offset| name_start + offset)
+            .unwrap_or(source.len());
+        let name = &source[name_start..name_end];
+        if name == "component" {
+            return Err(
+                "use an imported uppercase component function tag, such as <CoffeeProfile />"
+                    .into(),
+            );
+        }
+        let is_function_component = name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase());
+        if !is_function_component {
+            output.push_str(&source[cursor..start + 1]);
+            cursor = start + 1;
+            continue;
+        }
+
+        let end = html_tag_end(&source[start..])? + start;
+        let tag = &source[start..end];
+        output.push_str(&source[cursor..start]);
+        if !tag.trim_end_matches('>').trim_end().ends_with('/') {
+            return Err(format!(
+                "<{name}> component tags must be self-closing; pass values as properties"
+            ));
+        }
+        let attributes = component_attributes(&source[name_end..end - 1])?;
+        output.push_str(&format!(
+            "<component name=\"{}\"{}>",
+            component_tag_stem(name),
+            attributes.trim_end().trim_end_matches('/').trim_end()
+        ));
+        output.push_str("</component>");
+        cursor = end;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn component_attributes(source: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("={") {
+        let open = cursor + relative + 1;
+        let close = rust_brace_end(source, open)?;
+        output.push_str(&source[cursor..open]);
+        output.push('[');
+        output.push_str(&source[open + 1..close]);
+        output.push(']');
+        cursor = close + 1;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
 }
 
 #[cfg(feature = "compiler")]
@@ -498,8 +1217,6 @@ fn expand_script_option_mappings(source: &str) -> Result<String, String> {
 #[cfg(feature = "compiler")]
 fn expand_script_template_expressions(
     source: &str,
-    stylesheet: &[CssRule],
-    keyframes: &HashMap<String, Keyframes>,
     class_bindings: &mut HashMap<usize, String>,
     next_style_id: &mut usize,
     gpui_functions: &mut Vec<String>,
@@ -550,9 +1267,9 @@ fn expand_script_template_expressions(
             .ok_or("script template conditional must have one root element")?;
         let expression = element_code(
             conditional,
-            stylesheet,
-            keyframes,
             class_bindings,
+            &HashMap::new(),
+            "",
             next_style_id,
             gpui_functions,
         )?;
@@ -826,15 +1543,20 @@ fn replace_class_bindings(
         {
             value_start += 1;
         }
-        if tag.as_bytes().get(value_start) != Some(&b'{') {
-            cursor += 5;
-            continue;
-        }
+        let (open, close) = match tag.as_bytes().get(value_start) {
+            Some(b'{') => (b'{', b'}'),
+            Some(b'[') => (b'[', b']'),
+            _ => {
+                cursor += 5;
+                continue;
+            }
+        };
         if found {
             return Err("an element may have only one class={...} binding".into());
         }
-        let close = rust_brace_end(tag, value_start)?;
-        let expression = tag[value_start + 1..close].trim();
+        let close_at = matching_delimiter(tag, value_start, open, close)
+            .ok_or("unclosed Rust class style expression")?;
+        let expression = tag[value_start + 1..close_at].trim();
         if expression.is_empty() {
             return Err("class={...} needs a Rust style expression".into());
         }
@@ -842,7 +1564,7 @@ fn replace_class_bindings(
         bindings.insert(id, expression.to_owned());
         result.push_str(&tag[copied..cursor]);
         result.push_str(&format!(" data-rsc-class-binding=\"{id}\""));
-        cursor = close + 1;
+        cursor = close_at + 1;
         copied = cursor;
         found = true;
     }
@@ -883,262 +1605,22 @@ fn rust_brace_end(source: &str, open: usize) -> Result<usize, String> {
 }
 
 #[cfg(feature = "compiler")]
-#[derive(Clone)]
-struct CssRule {
-    selector: Selector,
-    max_width: Option<f32>,
-    declarations: String,
-}
-
-#[cfg(feature = "compiler")]
-#[derive(Clone, Copy, Default)]
-struct AnimationFrame {
-    top: Option<f32>,
-    bottom: Option<f32>,
-    opacity: Option<f32>,
-}
-
-#[cfg(feature = "compiler")]
-#[derive(Clone, Copy)]
-struct Keyframes {
-    from: AnimationFrame,
-    to: AnimationFrame,
-}
-
-#[cfg(feature = "compiler")]
-fn component_styles(
-    document: &Html,
-    input: &Path,
-) -> Result<(Vec<CssRule>, HashMap<String, Keyframes>), String> {
-    let style_selector = Selector::parse("style").expect("static style selector is valid");
-    let mut rules = Vec::new();
-    let mut keyframes = HashMap::new();
-    for style in document.select(&style_selector) {
-        let source = style.text().collect::<String>();
-        parse_stylesheet(&source, None, &mut rules, &mut keyframes).map_err(|error| {
-            format!(
-                "{} has an invalid component stylesheet: {error}",
-                input.display()
-            )
-        })?;
-    }
-    Ok((rules, keyframes))
-}
-
-#[cfg(feature = "compiler")]
-fn parse_stylesheet(
-    source: &str,
-    inherited_max_width: Option<f32>,
-    rules: &mut Vec<CssRule>,
-    keyframes: &mut HashMap<String, Keyframes>,
-) -> Result<(), String> {
-    let source = strip_css_comments(source)?;
-    let mut remaining = source.as_str();
-    loop {
-        remaining = remaining.trim_start();
-        if remaining.is_empty() {
-            break;
-        }
-        let Some(open) = remaining.find('{') else {
-            if remaining.trim().is_empty() {
-                break;
-            }
-            return Err(format!("expected '{{' after {}", remaining.trim()));
-        };
-        let header = remaining[..open].trim();
-        let close = matching_brace(remaining, open)
-            .ok_or_else(|| format!("missing closing '}}' for {header}"))?;
-        let body = &remaining[open + 1..close];
-        if let Some(condition) = header.strip_prefix("@media") {
-            let media_width = parse_media_max_width(condition)?;
-            let max_width = inherited_max_width
-                .map(|parent| parent.min(media_width))
-                .unwrap_or(media_width);
-            parse_stylesheet(body, Some(max_width), rules, keyframes)?;
-        } else if let Some(name) = header.strip_prefix("@keyframes") {
-            let name = name.trim();
-            if name.is_empty() {
-                return Err("@keyframes needs a name".into());
-            }
-            keyframes.insert(name.to_owned(), parse_keyframes(body)?);
-        } else if !header.starts_with('@') {
-            let selector = Selector::parse(header)
-                .map_err(|error| format!("invalid selector {header:?}: {error:?}"))?;
-            gpui_style_calls(body)?;
-            rules.push(CssRule {
-                selector,
-                max_width: inherited_max_width,
-                declarations: body.trim().to_owned(),
-            });
-        }
-        remaining = &remaining[close + 1..];
-    }
-    Ok(())
-}
-
-#[cfg(feature = "compiler")]
-fn parse_keyframes(source: &str) -> Result<Keyframes, String> {
-    let mut remaining = source;
-    let mut from = None;
-    let mut to = None;
-    loop {
-        remaining = remaining.trim_start();
-        if remaining.is_empty() {
-            break;
-        }
-        let open = remaining
-            .find('{')
-            .ok_or("keyframe needs a declaration block")?;
-        let selector = remaining[..open].trim();
-        let close = matching_brace(remaining, open).ok_or("unclosed keyframe block")?;
-        let frame = parse_animation_frame(&remaining[open + 1..close])?;
-        match selector {
-            "from" | "0%" => from = Some(frame),
-            "to" | "100%" => to = Some(frame),
-            _ => return Err(format!("unsupported keyframe stop {selector:?}")),
-        }
-        remaining = &remaining[close + 1..];
-    }
-    Ok(Keyframes {
-        from: from.ok_or("@keyframes needs a from block")?,
-        to: to.ok_or("@keyframes needs a to block")?,
-    })
-}
-
-#[cfg(feature = "compiler")]
-fn parse_animation_frame(source: &str) -> Result<AnimationFrame, String> {
-    let mut frame = AnimationFrame::default();
-    for declaration in source
-        .split(';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        let (name, value) = declaration
-            .split_once(':')
-            .ok_or_else(|| format!("invalid keyframe declaration {declaration:?}"))?;
-        let value = value.trim();
-        match name.trim() {
-            "top" => {
-                frame.top = Some(
-                    css_number(value)?
-                        .parse()
-                        .map_err(|_| "invalid top keyframe")?,
-                )
-            }
-            "bottom" => {
-                frame.bottom = Some(
-                    css_number(value)?
-                        .parse()
-                        .map_err(|_| "invalid bottom keyframe")?,
-                )
-            }
-            "opacity" => {
-                frame.opacity = Some(
-                    css_opacity(value)?
-                        .parse()
-                        .map_err(|_| "invalid opacity keyframe")?,
-                )
-            }
-            name => return Err(format!("unsupported keyframe property {name:?}")),
-        }
-    }
-    Ok(frame)
-}
-
-#[cfg(feature = "compiler")]
-fn strip_css_comments(source: &str) -> Result<String, String> {
-    let mut result = String::with_capacity(source.len());
-    let mut remaining = source;
-    while let Some(start) = remaining.find("/*") {
-        result.push_str(&remaining[..start]);
-        let after_start = &remaining[start + 2..];
-        let Some(end) = after_start.find("*/") else {
-            return Err("unterminated CSS comment".into());
-        };
-        result.push(' ');
-        remaining = &after_start[end + 2..];
-    }
-    result.push_str(remaining);
-    Ok(result)
-}
-
-#[cfg(feature = "compiler")]
-fn matching_brace(source: &str, open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (index, character) in source[open..].char_indices() {
-        match character {
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(open + index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-#[cfg(feature = "compiler")]
-fn parse_media_max_width(condition: &str) -> Result<f32, String> {
-    let (_, value) = condition
-        .split_once("max-width")
-        .ok_or_else(|| format!("only max-width media queries are supported: {condition}"))?;
-    let value = value
-        .trim_start()
-        .strip_prefix(':')
-        .ok_or_else(|| format!("invalid max-width media query: {condition}"))?
-        .trim()
-        .split(')')
-        .next()
-        .unwrap_or("")
-        .trim();
-    let number = value
-        .strip_suffix("px")
-        .unwrap_or(value)
-        .trim()
-        .parse::<f32>()
-        .map_err(|_| format!("invalid max-width value: {condition}"))?;
-    if !number.is_finite() || number <= 0.0 {
-        return Err(format!(
-            "max-width must be a positive pixel width: {condition}"
-        ));
-    }
-    Ok(number)
-}
-
-#[cfg(feature = "compiler")]
 fn element_code(
     element: ElementRef<'_>,
-    stylesheet: &[CssRule],
-    keyframes: &HashMap<String, Keyframes>,
     class_bindings: &HashMap<usize, String>,
+    style_variables: &HashMap<String, String>,
+    input_locals: &str,
     next_style_id: &mut usize,
     gpui_functions: &mut Vec<String>,
 ) -> Result<String, String> {
+    if element.value().name() == "style" {
+        return Err("<style> tags are not supported; put styles in a Rust styles({...}) bundle".into());
+    }
     let style_id = *next_style_id;
     *next_style_id += 1;
-    let element_responsive = stylesheet
-        .iter()
-        .filter(|rule| rule.max_width.is_some() && rule.selector.matches(&element))
-        .collect::<Vec<_>>();
-
-    let attrs = element
-        .value()
-        .attrs()
-        .filter(|(key, _)| {
-            *key != "style" && *key != "mobile-style" && *key != "data-rsc-class-binding"
-        })
-        .map(|(k, v)| format!("({:?}.into(), {:?}.into())", k, v))
-        .collect::<Vec<_>>();
-    let base_declarations = stylesheet
-        .iter()
-        .filter(|rule| rule.max_width.is_none() && rule.selector.matches(&element))
-        .map(|rule| rule.declarations.as_str())
-        .collect::<Vec<_>>()
-        .join(";");
-    let attrs = attrs.join(",");
+    if element.value().attr("style").is_some() || element.value().attr("mobile-style").is_some() {
+        return Err("CSS style attributes are not supported; use a Rust styles({...}) bundle".into());
+    }
     let class_binding = element
         .value()
         .attr("data-rsc-class-binding")
@@ -1152,41 +1634,20 @@ fn element_code(
                 .ok_or_else(|| format!("missing class binding {id}"))
         })
         .transpose()?;
-    let base_gpui_calls = gpui_style_calls(&base_declarations)?;
-    let mobile_style = element
-        .value()
-        .attr("mobile-style")
-        .filter(|style| !style.trim().is_empty());
-    let inline_style = element
-        .value()
-        .attr("style")
-        .filter(|style| !style.trim().is_empty());
-    if element_responsive
-        .iter()
-        .any(|rule| animation_declaration(&rule.declarations).is_some())
-        || element
-            .value()
-            .attr("mobile-style")
-            .and_then(animation_declaration)
-            .is_some()
+    if let Some(class_name) = element.value().attr("class")
+        && !class_name.trim().is_empty()
     {
-        return Err("responsive animation is not supported yet".into());
-    }
-    let animation = element
-        .value()
-        .attr("style")
-        .and_then(animation_declaration)
-        .or_else(|| animation_declaration(&base_declarations));
-    let animation_fn = if let Some(animation) = animation {
-        let name = format!("__rsc_animate_{style_id}");
-        let call = gpui_animation_call(animation, keyframes, &name)?;
-        gpui_functions.push(format!(
-            "fn {name}(element: gpui::Div) -> gpui::AnyElement {{\n    use gpui_kit::AnimationExt as _;\n    use gpui_kit::*;\n    use std::time::Duration;\n    element{call}.into_any_element()\n}}"
+        return Err(format!(
+            "static class={class_name:?} has no Rust style binding; use class={{myStyles.someStyle}}"
         ));
-        Some(name)
-    } else {
-        None
-    };
+    }
+    let attrs = element
+        .value()
+        .attrs()
+        .filter(|(key, _)| *key != "data-rsc-class-binding")
+        .map(|(k, v)| format!("({:?}.into(), {:?}.into())", k, v))
+        .collect::<Vec<_>>()
+        .join(",");
     let mut child_codes = Vec::new();
     let mut child_renders = Vec::new();
     for child in element.children() {
@@ -1200,74 +1661,46 @@ fn element_code(
                 let Some(child_element) = ElementRef::wrap(child) else {
                     continue;
                 };
-                if child_element.value().name() == "style" {
-                    continue;
-                }
                 let child_id = *next_style_id;
                 let code = element_code(
                     child_element,
-                    stylesheet,
-                    keyframes,
                     class_bindings,
+                    style_variables,
+                    input_locals,
                     next_style_id,
                     gpui_functions,
                 )?;
                 let child_index = child_codes.len();
                 child_codes.push(format!("gpui_rsc::TemplateNode::Element({code})"));
                 child_renders.push(format!(
-                    "    container = container.child(__rsc_render_{child_id}(view, view.child_element(element, {child_index}), viewport_width, cx));\n"
+                    "    container = container.child(__rsc_render_{child_id}(view, view.child_element(element, {child_index}), props, viewport_width, window, cx));\n"
                 ));
             }
             _ => {}
         }
     }
-    if element.value().name() == "component" {
-        child_renders = vec!["    container = container.child(view.render_node(&element.children[0], viewport_width, cx));\n".to_owned()];
-    }
     let children = child_codes.join(",");
     let render_name = format!("__rsc_render_{style_id}");
-    if animation_fn.is_some()
-        && (matches!(
-            element.value().name(),
-            "output" | "input" | "select" | "option"
-        ) || (element.value().name() == "button" && element.value().attr("data-out").is_some()))
-    {
-        return Err(format!(
-            "animation on <{}> is not supported",
-            element.value().name()
-        ));
-    }
-    let mut render_body = format!("let mut container = div(){base_gpui_calls};\n");
-    if let Some(mobile_style) = mobile_style {
-        let calls = gpui_style_calls(mobile_style)?;
-        render_body.push_str(&format!(
-            "    if view.is_mobile(viewport_width) {{ container = container{calls}; }}\n"
-        ));
-    }
-    for rule in &element_responsive {
-        let max_width = rule.max_width.unwrap();
-        let calls = gpui_style_calls(&rule.declarations)?;
-        render_body.push_str(&format!(
-            "    if viewport_width <= {max_width:?} {{ container = container{calls}; }}\n"
-        ));
-    }
+    let mut render_body = "let mut container = div();\n".to_owned();
+    render_body.push_str(input_locals);
     if let Some(expression) = class_binding {
         render_body.push_str(
-            "    let style_context = gpui_rsc::runtime::StyleContext { viewport_width, snapshot: view.snapshot() };\n    let context = &style_context;\n",
+            "    let style_context = gpui_rsc::runtime::StyleContext { viewport_width, props };\n    let context = &style_context;\n",
         );
-        if expression.contains("styles.") {
-            render_body.push_str("    let styles = styles(context);\n");
+        if let Some(root) = style_expression_root(expression) {
+            if let Some(initializer) = style_variables.get(&root) {
+                render_body.push_str(&format!("    let {root} = {initializer};\n"));
+            } else if expression.contains('.') {
+                render_body.push_str(&format!("    let {root} = {root}(context);\n"));
+            }
         }
         render_body.push_str(&format!(
             "    let bound_class_style: gpui_rsc::runtime::Style = {expression};\n    gpui::Refineable::refine(container.style(), &bound_class_style);\n"
         ));
     }
-    if let Some(inline_style) = inline_style {
-        let calls = gpui_style_calls(inline_style)?;
-        render_body.push_str(&format!("    container = container{calls};\n"));
-    }
     let content = match element.value().name() {
-        "rsc-if" => "view.render_if(element, container, viewport_width, cx)".to_owned(),
+        "component" => "container.child(view.render_component(element, viewport_width, window, cx)).into_any_element()".to_owned(),
+        "rsc-if" => "view.render_if(element, props, container, viewport_width, window, cx)".to_owned(),
             "output" | "rsc-value" => "view.render_output(element, container)".to_owned(),
             "input" => "{ let control_style = container.style().clone(); view.render_slider(element, container, control_style) }".to_owned(),
             "select" => "view.render_select(element, container)".to_owned(),
@@ -1280,17 +1713,13 @@ fn element_code(
                 for render in child_renders {
                     body.push_str(&render);
                 }
-                if let Some(name) = &animation_fn {
-                    body.push_str(&format!("    {name}(container)"));
-                } else {
-                    body.push_str("    container.into_any_element()");
-                }
+                body.push_str("    container.into_any_element()");
                 body
             }
     };
     render_body.push_str(&content);
     gpui_functions.push(format!(
-        "#[allow(unused_imports, unused_variables, unused_mut)]\nfn {render_name}(view: &gpui_rsc::runtime::view::HtmlView, element: &gpui_rsc::runtime::binding::Element, viewport_width: f32, cx: &mut gpui::Context<gpui_rsc::runtime::view::HtmlView>) -> gpui::AnyElement {{\n    use gpui_kit::*;\n    use gpui_rsc::runtime::Style;\n    {render_body}\n}}"
+        "#[allow(unused_imports, unused_variables, unused_mut, non_snake_case)]\nfn {render_name}(view: &mut gpui_rsc::runtime::view::HtmlView, element: &gpui_rsc::runtime::binding::Element, props: &gpui_rsc::runtime::ComponentProps, viewport_width: f32, window: &mut gpui::Window, cx: &mut gpui::Context<gpui_rsc::runtime::view::HtmlView>) -> gpui::AnyElement {{\n    use gpui_kit::*;\n    use gpui_rsc::runtime::Style;\n    {render_body}\n}}"
     ));
     Ok(format!(
         "gpui_rsc::TemplateElement::new({:?}, vec![{}], vec![{}]).with_render({render_name})",
@@ -1301,233 +1730,470 @@ fn element_code(
 }
 
 #[cfg(feature = "compiler")]
-fn animation_declaration(source: &str) -> Option<&str> {
-    source
-        .split(';')
-        .filter_map(|declaration| declaration.split_once(':'))
-        .filter(|(name, _)| name.trim() == "animation")
-        .map(|(_, value)| value.trim())
-        .last()
-}
+fn extract_style_variables<'a>(
+    prelude: &str,
+    class_expressions: impl Iterator<Item = &'a String>,
+) -> Result<(String, HashMap<String, String>), String> {
+    let referenced = class_expressions
+        .filter_map(|expression| style_expression_root(expression))
+        .collect::<std::collections::HashSet<_>>();
+    if referenced.is_empty() {
+        return Ok((prelude.to_owned(), HashMap::new()));
+    }
 
-#[cfg(feature = "compiler")]
-fn gpui_style_calls(source: &str) -> Result<String, String> {
-    let mut calls = String::new();
-    for declaration in source
-        .split(';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        let (name, value) = declaration
-            .split_once(':')
-            .ok_or_else(|| format!("invalid style declaration {declaration:?}"))?;
-        let (name, value) = (name.trim(), value.trim());
-        let call = match name {
-            "display" if value == "flex" => ".flex()".to_owned(),
-            "flex-direction" if value == "column" => ".flex_col()".to_owned(),
-            "flex-direction" if value == "row" => ".flex_row()".to_owned(),
-            "flex-wrap" if value == "wrap" => ".flex_wrap()".to_owned(),
-            "flex-wrap" if value == "nowrap" => ".flex_nowrap()".to_owned(),
-            "flex" if value == "1" => ".flex_1()".to_owned(),
-            "flex" if value == "0" || value == "none" => ".flex_none()".to_owned(),
-            "gap" => format!(".gap(px({}))", css_number(value)?),
-            "padding" => {
-                let [top, right, bottom, left] = css_box_values(value)?;
-                format!(".pt(px({top})).pr(px({right})).pb(px({bottom})).pl(px({left}))")
+    let block = syn::parse_str::<syn::Block>(&format!("{{{prelude}}}"))
+        .map_err(|error| format!("invalid component prelude: {error}"))?;
+    let mut remaining = Vec::new();
+    let mut style_variables = HashMap::new();
+    for statement in block.stmts {
+        let extracted = if let syn::Stmt::Local(local) = &statement {
+            let syn::Pat::Ident(pattern) = &local.pat else {
+                remaining.push(statement);
+                continue;
+            };
+            if referenced.contains(&pattern.ident.to_string()) {
+                if let Some(initializer) = &local.init {
+                    let expression = &initializer.expr;
+                    style_variables.insert(
+                        pattern.ident.to_string(),
+                        quote::quote!(#expression).to_string(),
+                    );
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
-            "padding-top" => format!(".pt(px({}))", css_number(value)?),
-            "padding-right" => format!(".pr(px({}))", css_number(value)?),
-            "padding-bottom" => format!(".pb(px({}))", css_number(value)?),
-            "padding-left" => format!(".pl(px({}))", css_number(value)?),
-            "background" | "background-color" => {
-                format!(".bg(rgb({}))", css_color(value)?)
-            }
-            "color" => format!(".text_color(rgb({}))", css_color(value)?),
-            "font-size" => format!(".text_size(px({}))", css_number(value)?),
-            "font-weight" => format!(".font_weight(FontWeight({:?}))", css_integer(value)? as f32),
-            "border" => {
-                let mut parts = value.split_whitespace();
-                let width = parts.next().ok_or("border needs a width")?;
-                let color = parts.last().ok_or("border needs a color")?;
-                let width = css_number(width)?;
-                format!(
-                    ".border(px({width})).border_color(rgb({}))",
-                    css_color(color)?
-                )
-            }
-            "border-radius" => format!(".rounded(px({}))", css_number(value)?),
-            "width" => format!(".w({})", css_gpui_length(value)?),
-            "height" => format!(".h({})", css_gpui_length(value)?),
-            "min-width" => format!(".min_w(px({}))", css_number(value)?),
-            "max-width" => format!(".max_w(px({}))", css_number(value)?),
-            "margin" if value == "auto" => ".mx_auto()".to_owned(),
-            "justify-content" if value == "space-between" => ".justify_between()".to_owned(),
-            "justify-content" if value == "center" => ".justify_center()".to_owned(),
-            "justify-content" if value == "flex-end" => ".justify_end()".to_owned(),
-            "justify-content" if value == "flex-start" => ".justify_start()".to_owned(),
-            "align-items" if value == "center" => ".items_center()".to_owned(),
-            "align-items" if value == "flex-start" => ".items_start()".to_owned(),
-            "align-items" if value == "flex-end" => ".items_end()".to_owned(),
-            "position" if value == "relative" => ".relative()".to_owned(),
-            "position" if value == "absolute" => ".absolute()".to_owned(),
-            "top" => format!(".top(px({}))", css_number(value)?),
-            "right" => format!(".right(px({}))", css_number(value)?),
-            "bottom" => format!(".bottom(px({}))", css_number(value)?),
-            "left" => format!(".left(px({}))", css_number(value)?),
-            "overflow" if value == "hidden" => ".overflow_hidden()".to_owned(),
-            "opacity" => format!(".opacity({})", css_opacity(value)?),
-            "animation" => String::new(),
-            // The generated document container owns GPUI scrolling.
-            "overflow-y" if value == "auto" || value == "scroll" => String::new(),
-            "overflow-y" if value == "hidden" => ".overflow_y_hidden()".to_owned(),
-            "overflow-y" if value == "visible" => String::new(),
-            _ => return Err(format!("unsupported GPUI style {name}:{value}")),
+        } else {
+            false
         };
-        calls.push_str(&call);
-    }
-    Ok(calls)
-}
-
-#[cfg(feature = "compiler")]
-fn gpui_animation_call(
-    value: &str,
-    keyframes: &HashMap<String, Keyframes>,
-    function_name: &str,
-) -> Result<String, String> {
-    let parts = value.split_whitespace().collect::<Vec<_>>();
-    let [name, duration, "infinite"] = parts.as_slice() else {
-        return Err(format!(
-            "animation needs a name, duration in ms, and infinite: {value:?}"
-        ));
-    };
-    let duration = duration
-        .strip_suffix("ms")
-        .ok_or_else(|| format!("animation duration must use ms: {value:?}"))?
-        .parse::<u64>()
-        .map_err(|_| format!("invalid animation duration: {value:?}"))?;
-    if duration == 0 {
-        return Err("animation duration must be positive".into());
-    }
-    let frames = keyframes
-        .get(*name)
-        .ok_or_else(|| format!("unknown @keyframes {name:?}"))?;
-    let mut calls = String::new();
-    for (property, from, to) in [
-        ("top", frames.from.top, frames.to.top),
-        ("bottom", frames.from.bottom, frames.to.bottom),
-        ("opacity", frames.from.opacity, frames.to.opacity),
-    ] {
-        match (from, to) {
-            (Some(from), Some(to)) => {
-                let value = format!("{from:?} + delta * {:?}", to - from);
-                calls.push_str(&match property {
-                    "top" => format!(".top(px({value}))"),
-                    "bottom" => format!(".bottom(px({value}))"),
-                    _ => format!(".opacity({value})"),
-                });
-            }
-            (None, None) => {}
-            _ => return Err(format!("{property} must be set in both animation stops")),
+        if !extracted {
+            remaining.push(statement);
         }
     }
-    if calls.is_empty() {
-        return Err(format!("@keyframes {name:?} has no supported properties"));
+
+    let remaining = remaining
+        .into_iter()
+        .map(|statement| quote::quote!(#statement).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((remaining, style_variables))
+}
+
+#[cfg(feature = "compiler")]
+fn style_expression_root(expression: &str) -> Option<String> {
+    fn root(expression: &syn::Expr) -> Option<String> {
+        match expression {
+            syn::Expr::Field(field) => root(&field.base),
+            syn::Expr::Path(path) if path.qself.is_none() => path
+                .path
+                .segments
+                .first()
+                .map(|segment| segment.ident.to_string()),
+            _ => None,
+        }
     }
+
+    let expression = syn::parse_str::<syn::Expr>(expression).ok()?;
+    root(&expression)
+}
+
+#[cfg(feature = "compiler")]
+fn expand_rust_style_bundles(source: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    let mut scan = 0;
+    let mut bundle_id = 0usize;
+    while let Some(relative) = source[scan..].find("styles") {
+        let start = scan + relative;
+        let before_is_ident = source[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        let after_name = start + "styles".len();
+        let open = skip_ascii_whitespace(source, after_name);
+        if before_is_ident || source.as_bytes().get(open) != Some(&b'(') {
+            scan = after_name;
+            continue;
+        }
+        let call_close =
+            matching_delimiter(source, open, b'(', b')').ok_or("unclosed styles(...) call")?;
+        let argument_open = skip_ascii_whitespace(source, open + 1);
+        if source.as_bytes().get(argument_open) != Some(&b'{') {
+            scan = after_name;
+            continue;
+        }
+        let close = matching_delimiter(source, argument_open, b'{', b'}')
+            .ok_or("unclosed style bundle object")?;
+        if close >= call_close || !source[close + 1..call_close].trim().is_empty() {
+            return Err("styles(...) accepts one style bundle object".into());
+        }
+        let fields = parse_style_bundle_fields(&source[argument_open + 1..close])?;
+        if fields.is_empty() {
+            return Err("styles(...) needs at least one named style".into());
+        }
+        let type_name = format!("__RscStyleBundle{bundle_id}");
+        bundle_id += 1;
+        let struct_fields = fields
+            .iter()
+            .map(|(name, _)| format!("{name}: gpui_rsc::runtime::Style"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let values = fields
+            .iter()
+            .map(|(name, style)| format!("{name}: {style}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        output.push_str(&source[cursor..start]);
+        output.push_str(&format!(
+            "{{ #[allow(dead_code)] struct {type_name} {{ {struct_fields} }} {type_name} {{ {values} }} }}"
+        ));
+        cursor = call_close + 1;
+        scan = cursor;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn parse_style_bundle_fields(source: &str) -> Result<Vec<(String, String)>, String> {
+    let mut fields = Vec::new();
+    for field in split_rust_top_level(source, ',') {
+        let field = field.trim();
+        if field.is_empty() {
+            continue;
+        }
+        let (name, value) = field
+            .split_once(':')
+            .ok_or_else(|| format!("style bundle field needs `name: {{ ... }}`: {field}"))?;
+        let name = name.trim();
+        if !is_simple_rust_identifier(name) {
+            return Err(format!("invalid style bundle name {name:?}"));
+        }
+        let value = value.trim();
+        if !value.starts_with('{')
+            || matching_delimiter(value, 0, b'{', b'}') != Some(value.len() - 1)
+        {
+            return Err(format!("style `{name}` needs a property object"));
+        }
+        fields.push((
+            name.to_owned(),
+            parse_style_properties(&value[1..value.len() - 1])?,
+        ));
+    }
+    Ok(fields)
+}
+
+#[cfg(feature = "compiler")]
+fn parse_style_properties(source: &str) -> Result<String, String> {
+    let mut style = "gpui_rsc::runtime::Style::new()".to_owned();
+    for property in split_rust_top_level(source, ',') {
+        let property = property.trim();
+        if property.is_empty() {
+            continue;
+        }
+        let (name, value) = property
+            .split_once(':')
+            .ok_or_else(|| format!("style property needs `name: value`: {property}"))?;
+        style.push_str(&style_property_call(name.trim(), value.trim())?);
+    }
+    Ok(style)
+}
+
+#[cfg(feature = "compiler")]
+fn style_property_call(name: &str, value: &str) -> Result<String, String> {
+    let property = camel_to_snake(name);
+    let mut method = property.as_str();
+    let mut arguments = value.to_owned();
+    let mut tuple_args = None;
+    match property.as_str() {
+        "display" => {
+            method = "display_flex";
+            arguments = match parse_string_literal(value)?.as_str() {
+                "flex" => "true".into(),
+                "block" => "false".into(),
+                other => return Err(format!("unsupported display value {other:?}")),
+            };
+        }
+        "flex_direction" => {
+            method = "flex_direction";
+            arguments = match parse_string_literal(value) {
+                Ok(value) => match value.as_str() {
+                    "column" => "true".into(),
+                    "row" => "false".into(),
+                    other => return Err(format!("unsupported flexDirection value {other:?}")),
+                },
+                Err(_) => {
+                    syn::parse_str::<syn::Expr>(value)
+                        .map_err(|error| format!("invalid flexDirection expression: {error}"))?;
+                    format!("({value}) == \"column\"")
+                }
+            };
+        }
+        "flex_wrap" => {
+            arguments = match parse_string_literal(value) {
+                Ok(value) => match value.as_str() {
+                    "wrap" => "true".into(),
+                    "nowrap" => "false".into(),
+                    other => return Err(format!("unsupported flexWrap value {other:?}")),
+                },
+                Err(_) => {
+                    syn::parse_str::<syn::Expr>(value)
+                        .map_err(|error| format!("invalid flexWrap expression: {error}"))?;
+                    format!("({value}) == \"wrap\"")
+                }
+            };
+        }
+        "flex" => {
+            method = "flex_grow";
+            arguments = match value {
+                "1" | "true" => "true".into(),
+                "0" | "false" => "false".into(),
+                _ => value.into(),
+            };
+        }
+        "flex_grow" => {}
+        "padding" => {
+            let values = if value.starts_with('(') {
+                parse_style_tuple(value)?
+            } else {
+                vec![value.to_owned()]
+            };
+            if values.is_empty() || values.len() > 4 {
+                return Err("padding needs one to four values".into());
+            }
+            let expanded = match values.as_slice() {
+                [all] => vec![all.clone(), all.clone(), all.clone(), all.clone()],
+                [vertical, horizontal] => vec![
+                    vertical.clone(),
+                    horizontal.clone(),
+                    vertical.clone(),
+                    horizontal.clone(),
+                ],
+                [top, horizontal, bottom] => vec![
+                    top.clone(),
+                    horizontal.clone(),
+                    bottom.clone(),
+                    horizontal.clone(),
+                ],
+                [top, right, bottom, left] => {
+                    vec![top.clone(), right.clone(), bottom.clone(), left.clone()]
+                }
+                _ => unreachable!(),
+            };
+            tuple_args = Some(expanded);
+        }
+        "border" => {
+            tuple_args = Some(parse_style_tuple(value)?);
+        }
+        "background_color" | "text_color" => {
+            arguments = expand_style_color(value)?;
+        }
+        "border_color" => {
+            arguments = expand_style_color(value)?;
+        }
+        "position" => {
+            let position = parse_string_literal(value)?;
+            method = match position.as_str() {
+                "relative" => "position_relative",
+                "absolute" => "position_absolute",
+                other => return Err(format!("unsupported position value {other:?}")),
+            };
+            arguments.clear();
+        }
+        "overflow" => {
+            method = match parse_string_literal(value)?.as_str() {
+                "hidden" => "overflow_hidden",
+                other => return Err(format!("unsupported overflow value {other:?}")),
+            };
+            arguments.clear();
+        }
+        "overflow_y" => {
+            arguments = match parse_string_literal(value)?.as_str() {
+                "auto" | "scroll" => "true".into(),
+                "hidden" => {
+                    method = "overflow_y_hidden";
+                    arguments.clear();
+                    String::new()
+                }
+                "visible" => "false".into(),
+                other => return Err(format!("unsupported overflowY value {other:?}")),
+            };
+        }
+        "margin" => {
+            if parse_string_literal(value)? != "auto" {
+                return Err("margin currently supports only `auto`".into());
+            }
+            method = "margin_auto";
+            arguments.clear();
+        }
+        "margin_auto" => {
+            method = "margin_auto_enabled";
+        }
+        "justify_content" | "align_items" => {
+            if let Ok(value) = parse_string_literal(value) {
+                let accepted = if property == "justify_content" {
+                    ["center", "space-between", "flex-end", "flex-start"]
+                } else {
+                    ["center", "stretch", "flex-start", "flex-end"]
+                };
+                if !accepted.contains(&value.as_str()) {
+                    return Err(format!("unsupported {name} value {value:?}"));
+                }
+                arguments = format!("{value:?}");
+            } else {
+                syn::parse_str::<syn::Expr>(value)
+                    .map_err(|error| format!("invalid {name} expression: {error}"))?;
+            }
+        }
+        "background" | "color" => {
+            method = if property == "background" {
+                "background_color"
+            } else {
+                "text_color"
+            };
+            arguments = expand_style_color(value)?;
+        }
+        "animation" => {
+            return Err("animation is not currently supported in styles({...})".into());
+        }
+        _ => {}
+    }
+
+    let argument_list = if let Some(mut arguments) = tuple_args {
+        let expected = if property == "padding" { 4 } else { 2 };
+        if arguments.len() != expected {
+            return Err(format!(
+                "style `{name}` needs {expected} tuple value(s), got {}",
+                arguments.len()
+            ));
+        }
+        if property == "border" {
+            arguments[1] = expand_style_color(&arguments[1])?;
+        }
+        for argument in &arguments {
+            syn::parse_str::<syn::Expr>(argument)
+                .map_err(|error| format!("invalid value for style `{name}`: {error}"))?;
+        }
+        arguments.join(",")
+    } else {
+        if !arguments.is_empty() {
+            syn::parse_str::<syn::Expr>(&arguments)
+                .map_err(|error| format!("invalid value for style `{name}`: {error}"))?;
+            arguments
+        } else {
+            String::new()
+        }
+    };
+    Ok(format!(".{method}({argument_list})"))
+}
+
+#[cfg(feature = "compiler")]
+fn parse_string_literal(value: &str) -> Result<String, String> {
+    let literal = syn::parse_str::<syn::LitStr>(value)
+        .map_err(|_| format!("expected a quoted string style value, got {value:?}"))?;
+    Ok(literal.value())
+}
+
+#[cfg(feature = "compiler")]
+fn parse_style_tuple(value: &str) -> Result<Vec<String>, String> {
+    let expression = syn::parse_str::<syn::Expr>(value)
+        .map_err(|error| format!("style shorthand must be a tuple: {error}"))?;
+    let syn::Expr::Tuple(tuple) = expression else {
+        return Err("padding and border values must be tuples".into());
+    };
+    if tuple.elems.is_empty() {
+        return Err("style tuple cannot be empty".into());
+    }
+    Ok(tuple
+        .elems
+        .into_iter()
+        .map(|expression| quote::quote!(#expression).to_string())
+        .collect())
+}
+
+#[cfg(feature = "compiler")]
+fn expand_style_color(value: &str) -> Result<String, String> {
+    let Some(open) = value.find('(') else {
+        return Ok(value.to_owned());
+    };
+    let function = value[..open].trim();
+    if !matches!(function, "rgba" | "rgb") {
+        return Ok(value.to_owned());
+    }
+    let close = matching_delimiter(value, open, b'(', b')')
+        .ok_or_else(|| format!("unclosed {function}(...) color"))?;
+    if close + 1 != value.len() {
+        return Ok(value.to_owned());
+    }
+    let channels = split_rust_top_level(&value[open + 1..close], ',');
+    if (function == "rgb" && channels.len() != 3)
+        || (function == "rgba" && !matches!(channels.len(), 3 | 4))
+    {
+        return Err(format!(
+            "{function} color needs three channels and optional alpha"
+        ));
+    }
+    let alpha = channels.get(3).copied().unwrap_or("1.0").trim();
     Ok(format!(
-        ".with_animation({:?}, Animation::new(Duration::from_millis({duration})).repeat_synced(), |this, delta| this{calls})",
-        format!("{function_name}-{name}")
+        "gpui::Rgba {{ r: {}, g: {}, b: {}, a: {} }}",
+        channels[0].trim(),
+        channels[1].trim(),
+        channels[2].trim(),
+        alpha
     ))
 }
 
 #[cfg(feature = "compiler")]
-fn css_gpui_length(value: &str) -> Result<String, String> {
-    if let Some(percent) = value.strip_suffix('%') {
-        let number = percent
-            .parse::<f32>()
-            .map_err(|_| format!("invalid CSS percentage {value:?}"))?;
-        if !number.is_finite() {
-            return Err(format!("invalid CSS percentage {value:?}"));
+fn split_rust_top_level(source: &str, separator: char) -> Vec<&str> {
+    let mut output = Vec::new();
+    let mut start = 0;
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in source.char_indices() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
         }
-        Ok(format!("relative({:?})", number / 100.0))
-    } else {
-        Ok(format!("px({})", css_number(value)?))
-    }
-}
-
-#[cfg(feature = "compiler")]
-fn css_opacity(value: &str) -> Result<String, String> {
-    let number = value
-        .trim()
-        .parse::<f32>()
-        .map_err(|_| format!("invalid CSS opacity {value:?}"))?;
-    if !number.is_finite() || !(0.0..=1.0).contains(&number) {
-        return Err(format!("invalid CSS opacity {value:?}"));
-    }
-    Ok(format!("{number:?}"))
-}
-
-#[cfg(feature = "compiler")]
-fn css_number(value: &str) -> Result<String, String> {
-    let number = value.trim().strip_suffix("px").unwrap_or(value.trim());
-    let parsed = number
-        .parse::<f32>()
-        .map_err(|_| format!("invalid CSS length {value:?}"))?;
-    if !parsed.is_finite() {
-        return Err(format!("invalid CSS length {value:?}"));
-    }
-    Ok(format!("{parsed:?}"))
-}
-
-#[cfg(feature = "compiler")]
-fn css_integer(value: &str) -> Result<u16, String> {
-    value
-        .parse::<u16>()
-        .map_err(|_| format!("invalid CSS integer {value:?}"))
-}
-
-#[cfg(feature = "compiler")]
-fn css_color(value: &str) -> Result<String, String> {
-    let hex = value
-        .strip_prefix('#')
-        .ok_or_else(|| format!("unsupported CSS color {value:?}"))?;
-    let color = u32::from_str_radix(hex, 16).map_err(|_| format!("invalid CSS color {value:?}"))?;
-    if hex.len() != 3 && hex.len() != 6 {
-        return Err(format!("unsupported CSS color {value:?}"));
-    }
-    let color = if hex.len() == 3 {
-        let r = (color >> 8) & 0xf;
-        let g = (color >> 4) & 0xf;
-        let b = color & 0xf;
-        (r * 0x11 << 16) | (g * 0x11 << 8) | (b * 0x11)
-    } else {
-        color
-    };
-    Ok(format!("0x{color:06x}"))
-}
-
-#[cfg(feature = "compiler")]
-fn css_box_values(value: &str) -> Result<[String; 4], String> {
-    let values = value
-        .split_whitespace()
-        .map(css_number)
-        .collect::<Result<Vec<_>, _>>()?;
-    match values.as_slice() {
-        [all] => Ok([all.clone(), all.clone(), all.clone(), all.clone()]),
-        [vertical, horizontal] => Ok([
-            vertical.clone(),
-            horizontal.clone(),
-            vertical.clone(),
-            horizontal.clone(),
-        ]),
-        [top, horizontal, bottom] => Ok([
-            top.clone(),
-            horizontal.clone(),
-            bottom.clone(),
-            horizontal.clone(),
-        ]),
-        [top, right, bottom, left] => {
-            Ok([top.clone(), right.clone(), bottom.clone(), left.clone()])
+        match character {
+            '"' => quote = Some(character),
+            '(' => parens += 1,
+            ')' => parens = parens.saturating_sub(1),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            _ if character == separator && parens == 0 && brackets == 0 && braces == 0 => {
+                output.push(&source[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
         }
-        _ => Err(format!("invalid CSS padding {value:?}")),
     }
+    output.push(&source[start..]);
+    output
+}
+
+#[cfg(feature = "compiler")]
+fn camel_to_snake(name: &str) -> String {
+    let mut output = String::new();
+    for character in name.chars() {
+        if character.is_ascii_uppercase() {
+            output.push('_');
+            output.push(character.to_ascii_lowercase());
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }

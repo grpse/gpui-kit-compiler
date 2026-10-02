@@ -225,7 +225,7 @@ enum Message {
 pub struct Engine {
     sender: Sender<Message>,
     shared: Arc<Mutex<Snapshot>>,
-    updates: Arc<Mutex<Receiver<Snapshot>>>,
+    subscribers: Arc<Mutex<Vec<Sender<Snapshot>>>>,
 }
 
 impl Engine {
@@ -236,8 +236,9 @@ impl Engine {
     ) -> Self {
         let shared = Arc::new(Mutex::new(calculate(&defaults, 0)));
         let (sender, receiver) = mpsc::channel();
-        let (updates_tx, updates) = mpsc::channel();
+        let subscribers = Arc::new(Mutex::new(Vec::<Sender<Snapshot>>::new()));
         let shared_worker = Arc::clone(&shared);
+        let subscribers_worker = Arc::clone(&subscribers);
         thread::Builder::new()
             .name("rsc-calculation-worker".into())
             .spawn(move || {
@@ -263,14 +264,17 @@ impl Engine {
                     }
                     let next = calculate(&values, reset_epoch);
                     *shared_worker.lock().expect("snapshot lock poisoned") = next.clone();
-                    let _ = updates_tx.send(next);
+                    subscribers_worker
+                        .lock()
+                        .expect("snapshot subscribers lock poisoned")
+                        .retain(|subscriber| subscriber.send(next.clone()).is_ok());
                 }
             })
             .expect("failed to start calculation worker");
         Self {
             sender,
             shared,
-            updates: Arc::new(Mutex::new(updates)),
+            subscribers,
         }
     }
     pub fn set(&self, key: impl Into<String>, value: Value) {
@@ -283,7 +287,12 @@ impl Engine {
         let _ = self.sender.send(Message::Reset);
     }
     pub fn subscribe(&self) -> Arc<Mutex<Receiver<Snapshot>>> {
-        Arc::clone(&self.updates)
+        let (sender, receiver) = mpsc::channel();
+        self.subscribers
+            .lock()
+            .expect("snapshot subscribers lock poisoned")
+            .push(sender);
+        Arc::new(Mutex::new(receiver))
     }
     pub fn snapshot(&self) -> Snapshot {
         self.shared.lock().expect("snapshot lock poisoned").clone()

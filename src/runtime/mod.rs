@@ -3,6 +3,8 @@ mod component;
 mod model;
 pub mod view;
 pub use binding::{InlineStyle, Length};
-pub use component::{Definition, OutputFormatter, SelectOption, Style, StyleContext};
+pub use component::{
+    ComponentProps, Definition, OutputFormatter, SelectOption, Style, StyleContext,
+};
 pub use model::{Binding, Direction, Engine, Snapshot, Value};
-pub use view::run;
+pub use view::{StartupConfig, StartupDecorations, StartupWindowState, run, run_with_config};

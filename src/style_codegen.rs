@@ -223,8 +223,16 @@ fn lower_chain(
             ("padding", [t, r, b, l]) => {
                 quote!(__style.pt(gpui::px(#t)).pr(gpui::px(#r)).pb(gpui::px(#b)).pl(gpui::px(#l)))
             }
+            ("padding_top", [v]) => quote!(__style.pt(gpui::px(#v))),
+            ("padding_right", [v]) => quote!(__style.pr(gpui::px(#v))),
+            ("padding_bottom", [v]) => quote!(__style.pb(gpui::px(#v))),
+            ("padding_left", [v]) => quote!(__style.pl(gpui::px(#v))),
+            ("background_color", [v]) if is_rgba_expression(v) => quote!(__style.bg(#v)),
+            ("text_color", [v]) if is_rgba_expression(v) => quote!(__style.text_color(#v)),
+            ("border_color", [v]) if is_rgba_expression(v) => quote!(__style.border_color(#v)),
             ("background_color", [v]) => quote!(__style.bg(gpui::rgb(#v))),
             ("text_color", [v]) => quote!(__style.text_color(gpui::rgb(#v))),
+            ("border_color", [v]) => quote!(__style.border_color(gpui::rgb(#v))),
             ("width", [v]) => quote!(__style.w(#v)),
             ("height", [v]) => quote!(__style.h(#v)),
             ("min_width", [v]) => quote!(__style.min_w(gpui::px(#v))),
@@ -232,7 +240,19 @@ fn lower_chain(
             ("border_radius", [v]) => quote!(__style.rounded(gpui::px(#v))),
             ("font_size", [v]) => quote!(__style.text_size(gpui::px(#v))),
             ("font_weight", [v]) => quote!(__style.font_weight(gpui::FontWeight((#v) as f32))),
+            ("border", [w, c]) if is_rgba_expression(c) => {
+                quote!(__style.border(gpui::px(#w)).border_color(#c))
+            }
             ("border", [w, c]) => quote!(__style.border(gpui::px(#w)).border_color(gpui::rgb(#c))),
+            ("position_relative", []) => quote!(__style.relative()),
+            ("position_absolute", []) => quote!(__style.absolute()),
+            ("top", [v]) => quote!(__style.top(gpui::px(#v))),
+            ("right", [v]) => quote!(__style.right(gpui::px(#v))),
+            ("bottom", [v]) => quote!(__style.bottom(gpui::px(#v))),
+            ("left", [v]) => quote!(__style.left(gpui::px(#v))),
+            ("overflow_hidden", []) => quote!(__style.overflow_hidden()),
+            ("overflow_y_hidden", []) => quote!(__style.overflow_y_hidden()),
+            ("opacity", [v]) => quote!(__style.opacity(#v)),
             ("margin_auto", []) => quote!(__style.mx_auto()),
             ("margin_auto_enabled", [v]) => quote!(if #v { __style.mx_auto() } else { __style }),
             ("overflow_y", [v]) => {
@@ -260,4 +280,15 @@ fn lower_chain(
         __style.style().clone()
     }))
     .map_err(|e| e.to_string())
+}
+
+fn is_rgba_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Struct(expression) => expression
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Rgba"),
+        _ => false,
+    }
 }

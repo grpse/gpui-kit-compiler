@@ -1,17 +1,23 @@
-<script>
 use gpui_rsc::{in_binding, in_out_binding, out_binding};
-use gpui_rsc::runtime::{Value, Snapshot};
+use gpui_rsc::runtime::{Snapshot, StyleContext, Value};
 use std::collections::HashMap;
 
-use gpui_rsc::{component, runtime::{Definition, InlineStyle as Style, StyleContext}};
-use crate::generated::{coffee_profile, coffee_variables_form, extraction_previews};
+use gpui_rsc::{component, runtime::Definition};
+use crate::generated::coffee_profile::CoffeeProfile;
+use crate::generated::coffee_variables_form::CoffeeVariablesForm;
+use crate::generated::extraction_previews::ExtractionPreviews;
+
+pub fn title() -> &'static str { "Coffee / Lab" }
 
 pub fn definition() -> Definition {
     component! {
         name: "app",
-        imports: [coffee_variables_form::CoffeeVariablesFormComponent::definition(), coffee_profile::CoffeeProfileComponent::definition(), extraction_previews::ExtractionPreviewsComponent::definition()],
         bindings: [
             in_out_binding!("method" => "recipe.method"),
+            in_binding!("active_tab" => "ui.active_tab"),
+            out_binding!("tab_recipe", |engine, _| engine.set("ui.active_tab", Value::Text("recipe".into()))),
+            out_binding!("tab_prediction", |engine, _| engine.set("ui.active_tab", Value::Text("prediction".into()))),
+            out_binding!("tab_actions", |engine, _| engine.set("ui.active_tab", Value::Text("actions".into()))),
             in_out_binding!("dose" => "recipe.dose"),
             in_out_binding!("water" => "recipe.water"),
             in_out_binding!("grind" => "recipe.grind"),
@@ -47,7 +53,6 @@ pub fn definition() -> Definition {
 
             in_binding!("ratio", |snapshot: &Snapshot| snapshot.get("derived.ratio").cloned()),
             in_binding!("extraction_signal" => "derived.extraction_signal"),
-            in_binding!("character" => "preview.character"),
         ],
         calculate: calculate,
         on_change: adjust_recipe_to_target,
@@ -67,26 +72,6 @@ pub fn output_format(name: &str, value: &Value) -> String {
     }
 }
 
-pub struct AppStyles {
-    pub mobile_card: Style,
-}
-
-fn mobile_card_style(context: &StyleContext<'_>) -> Style {
-    if context.viewport_width <= 768.0 {
-        let card_width = (context.viewport_width - 28.0).max(0.0).min(560.0);
-        Style::new()
-            .width(Length::Percent(1.0))
-            .min_width(0.0)
-            .max_width(card_width)
-    } else {
-        Style::new()
-    }
-}
-
-pub fn styles(context: &StyleContext<'_>) -> AppStyles {
-    AppStyles { mobile_card: mobile_card_style(context) }
-}
-
 fn number(recipe: &HashMap<String, Value>, key: &str, fallback: f32) -> f32 {
     recipe.get(key).and_then(Value::number).unwrap_or(fallback)
 }
@@ -94,6 +79,15 @@ fn choice<'a>(recipe: &'a HashMap<String, Value>, key: &str, fallback: &'a str) 
     match recipe.get(key) {
         Some(Value::Text(v)) => v,
         _ => fallback,
+    }
+}
+
+fn tab_channel(context: &StyleContext<'_>, tab: &str, channel: usize) -> f32 {
+    let active = matches!(context.props.get("active_tab"), Some(Value::Text(value)) if value == tab);
+    if active {
+        [0.29, 0.20, 0.12][channel]
+    } else {
+        0.0
     }
 }
 
@@ -199,16 +193,6 @@ pub fn calculate(recipe: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot 
         values.insert(key.into(), Value::Number(value));
     }
     values.insert("profile.notes".into(), Value::Text(notes.join("  •  ")));
-    let character = if intensity > 69.0 || bitterness > 62.0 {
-        "Bold & roasty"
-    } else if clarity > 70.0 && acidity > 58.0 {
-        "Bright & tea-like"
-    } else if body > 66.0 {
-        "Silky & full"
-    } else {
-        "Soft & balanced"
-    };
-    values.insert("preview.character".into(), Value::Text(character.into()));
     values.insert(
         "derived.extraction_signal".into(),
         Value::Text(
@@ -222,6 +206,9 @@ pub fn calculate(recipe: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot 
             .into(),
         ),
     );
+    values
+        .entry("ui.active_tab".into())
+        .or_insert_with(|| Value::Text("recipe".into()));
     Snapshot {
         values,
         reset_epoch,
@@ -299,46 +286,78 @@ pub fn adjust_recipe_to_target(recipe: &mut HashMap<String, Value>, changed_key:
         }
     }
 }
-</script>
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Coffee / Lab</title>
-  <style>
-    @media (max-width: 768px) {
-      main { padding:18px 14px; gap:18px; }
-      header { flex-direction:column; align-items:center; gap:12px; }
-      .cards { flex-direction:column; flex-wrap:nowrap; align-items:center; gap:16px; width:100%; min-width:0; }
-      .mobile-card { width:100%; max-width:560px; min-width:0; }
-    }
-    .page { background:#17130f; color:#f4ece1; overflow-y:auto; }
-    .page-content { width:100%; max-width:1200px; margin:auto; padding:28px; display:flex; flex-direction:column; gap:24px; }
-    .page-header { display:flex; justify-content:space-between; align-items:center; gap:20px; }
-    .brand-heading { display:flex; flex-direction:column; gap:5px; }
-    .eyebrow { font-size:10px; font-weight:600; color:#d99b59; }
-    .page-title { font-size:28px; font-weight:700; color:#f8f1e8; }
-    .page-subtitle { font-size:13px; color:#a99b8d; }
-    .build-badge { background:#2b2118; border:1px solid #4b3928; border-radius:99px; padding:8px 12px; color:#e0ad71; font-size:10px; font-weight:600; }
-    .cards { display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; }
-  </style>
-</head>
-<body class="page">
-  <main class="page-content">
-    <header class="page-header">
-      <div class="brand-heading">
-        <p class="eyebrow">BREW RECIPE STUDIO</p>
-        <h1 class="page-title">Coffee / Lab</h1>
-        <p class="page-subtitle">Describe the brew you made. See how each choice shifts the cup.</p>
-      </div>
-      <div class="build-badge">●  RECIPE ESTIMATE</div>
-    </header>
 
-    <div class="cards">
-      <component class="mobile-card controls-form" class={styles.mobile_card} name="coffee-variables-form" method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
-      <component class="mobile-card profile-form" class={styles.mobile_card} name="coffee-profile" acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
-      <component class="extraction-gallery" name="extraction-previews" water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" method="[method]" />
+pub fn App() -> gpui::AnyElement {
+    let myStyles = styles({
+        recipe: { flex: 1, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "recipe", 0), tab_channel(context, "recipe", 1), tab_channel(context, "recipe", 2)) },
+        prediction: { flex: 1, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "prediction", 0), tab_channel(context, "prediction", 1), tab_channel(context, "prediction", 2)) },
+        actions: { flex: 1, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "actions", 0), tab_channel(context, "actions", 1), tab_channel(context, "actions", 2)) },
+        page: { width: gpui::Length::Percent(1.0), minWidth: 0.0, backgroundColor: rgba(23.0 / 255.0, 19.0 / 255.0, 15.0 / 255.0), textColor: rgba(244.0 / 255.0, 236.0 / 255.0, 225.0 / 255.0) },
+        pageContent: {
+            width: gpui::Length::Percent(1.0), maxWidth: 1440.0, margin: "auto",
+            paddingTop: if context.viewport_width <= 800.0 { 18.0 } else { 28.0 },
+            paddingRight: if context.viewport_width <= 800.0 { 14.0 } else { 28.0 },
+            paddingBottom: if context.viewport_width <= 800.0 { 18.0 } else { 28.0 },
+            paddingLeft: if context.viewport_width <= 800.0 { 14.0 } else { 28.0 },
+            display: "flex", flexDirection: "column",
+            gap: if context.viewport_width <= 800.0 { 18.0 } else { 24.0 }
+        },
+        pageHeader: {
+            display: "flex",
+            flexDirection: if context.viewport_width <= 800.0 { "column" } else { "row" },
+            justifyContent: if context.viewport_width <= 800.0 { "center" } else { "space-between" },
+            alignItems: "center",
+            gap: if context.viewport_width <= 800.0 { 12.0 } else { 20.0 }
+        },
+        brandHeading: { display: "flex", flexDirection: "column", gap: 5.0 },
+        eyebrow: { fontSize: 10.0, fontWeight: 600, color: rgba(217.0 / 255.0, 155.0 / 255.0, 89.0 / 255.0) },
+        pageTitle: { fontSize: 28.0, fontWeight: 700, color: rgba(248.0 / 255.0, 241.0 / 255.0, 232.0 / 255.0) },
+        pageSubtitle: { fontSize: 13.0, color: rgba(169.0 / 255.0, 155.0 / 255.0, 141.0 / 255.0) },
+        buildBadge: { backgroundColor: rgba(43.0 / 255.0, 33.0 / 255.0, 24.0 / 255.0), border: (1.0, rgba(75.0 / 255.0, 57.0 / 255.0, 40.0 / 255.0)), borderRadius: 99.0, padding: (8.0, 12.0), color: rgba(224.0 / 255.0, 173.0 / 255.0, 113.0 / 255.0), fontSize: 10.0, fontWeight: 600 },
+        workbench: {
+            display: "flex",
+            flexDirection: if context.viewport_width <= 800.0 { "column" } else { "row" },
+            alignItems: "stretch", gap: if context.viewport_width <= 800.0 { 16.0 } else { 24.0 },
+            flexWrap: "nowrap", width: gpui::Length::Percent(1.0), minWidth: 0.0
+        },
+        tabsCard: { display: "flex", flexDirection: "column", flex: 1, minWidth: if context.viewport_width <= 800.0 { 0.0 } else { 360.0 }, gap: 18.0 },
+        coffeeDrawing: { display: "flex", flex: 1, minWidth: if context.viewport_width <= 800.0 { 0.0 } else { 360.0 } },
+        tabBar: { display: "flex", gap: 6.0, padding: 6.0, border: (1.0, rgba(59.0 / 255.0, 49.0 / 255.0, 40.0 / 255.0)), borderRadius: 14.0, backgroundColor: rgba(33.0 / 255.0, 28.0 / 255.0, 23.0 / 255.0) },
+        tabContent: { display: "flex", flex: 1, minWidth: 0.0 },
+        tabPanel: { display: "flex", flex: 1, width: gpui::Length::Percent(1.0), minWidth: 0.0 }
+    });
+<div class={myStyles.page}>
+  <div class={myStyles.pageContent}>
+      <div class={myStyles.pageHeader}>
+        <div class={myStyles.brandHeading}>
+          <div class={myStyles.eyebrow}>BREW RECIPE STUDIO</div>
+          <div class={myStyles.pageTitle}>Coffee / Lab</div>
+          <div class={myStyles.pageSubtitle}>Describe the brew you made. See how each choice shifts the cup.</div>
+        </div>
+        <div class={myStyles.buildBadge}>●  RECIPE ESTIMATE</div>
+      </div>
+
+      <div class={myStyles.workbench}>
+        <ExtractionPreviews class={myStyles.coffeeDrawing} water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" method="[method]" />
+        <div class={myStyles.tabsCard}>
+          <div class={myStyles.tabBar}>
+            <button id="tab-recipe" data-out="tab_recipe" class={myStyles.recipe}>Recipe</button>
+            <button id="tab-prediction" data-out="tab_prediction" class={myStyles.prediction}>Cup Prediction</button>
+            <button id="tab-actions" data-out="tab_actions" class={myStyles.actions}>What you did</button>
+          </div>
+          <div class={myStyles.tabContent}>
+            {if active_tab == "recipe" {
+              <CoffeeVariablesForm class={myStyles.tabPanel} section=["recipe"] method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
+            } else {
+              {if active_tab == "prediction" {
+                <CoffeeProfile class={myStyles.tabPanel} acidity="[acidity]" sweetness="[sweetness]" bitterness="[bitterness]" body="[body]" clarity="[clarity]" astringency="[astringency]" intensity="[intensity]" notes="[notes]" ratio="[ratio]" extraction_signal="[extraction_signal]" />
+              } else {
+                <CoffeeVariablesForm class={myStyles.tabPanel} section=["actions"] method="[method]" dose="[dose]" water="[water]" grind="[grind]" temperature="[temperature]" time="[time]" pours="[pours]" stirs="[stirs]" swirls="[swirls]" filter="[filter]" reset="[reset]" />
+              }}
+            }}
+          </div>
+        </div>
+      </div>
     </div>
-  </main>
-</body>
-</html>
+  </div>
+}

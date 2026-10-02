@@ -1,5 +1,7 @@
 //! Binds a compiler-generated element tree to application state and GPUI Kit.
-use crate::runtime::{Binding, Definition, Direction, OutputFormatter, SelectOption, Snapshot, Value};
+use crate::runtime::{
+    Binding, ComponentProps, Definition, Direction, OutputFormatter, SelectOption, Snapshot, Value,
+};
 
 use crate::{RenderFn, TemplateElement, TemplateNode};
 use std::collections::{HashMap, HashSet};
@@ -18,6 +20,13 @@ pub struct Element {
     pub binding: Option<Binding>,
     pub args: Vec<Binding>,
     pub control_id: Option<String>,
+    pub component: Option<ComponentInstance>,
+}
+
+#[derive(Clone)]
+pub struct ComponentInstance {
+    pub id: String,
+    pub page: Box<Page>,
 }
 impl Element {
     pub fn attr(&self, key: &str) -> Option<&str> {
@@ -79,41 +88,111 @@ pub struct Page {
     pub defaults: HashMap<String, Value>,
     pub mobile_breakpoint: Option<f32>,
     pub output_formatter: Option<OutputFormatter>,
+    pub inputs: Vec<Binding>,
+    pub renderer: crate::ComponentRenderFn,
+}
+
+impl Page {
+    pub fn props(&self, snapshot: &Snapshot) -> ComponentProps {
+        ComponentProps::from_values(
+            self.inputs
+                .iter()
+                .filter_map(|binding| binding.get(snapshot).map(|value| (binding.name, value)))
+                .collect(),
+        )
+    }
 }
 
 pub fn compile(def: &Definition) -> Result<Page, String> {
-    let mut controls = Vec::new();
-    let mut seen = HashSet::new();
     let scope = def
         .bindings
         .iter()
         .map(|b| (b.name.to_owned(), b.clone()))
         .collect();
-    let root = compile_component(def, &scope, def.name, &mut controls, &mut seen)?;
+    compile_component(def, &scope, def.name)
+}
+fn compile_component(
+    def: &Definition,
+    scope: &HashMap<String, Binding>,
+    path: &str,
+) -> Result<Page, String> {
+    let mut controls = Vec::new();
+    let mut seen = HashSet::new();
+    let root = compile_element(&def.template, def, scope, path, &mut controls, &mut seen)?;
     let defaults = controls
         .iter()
-        .filter_map(|c| {
-            c.binding()
+        .filter_map(|control| {
+            control
+                .binding()
                 .data_key
-                .map(|k| (k.to_owned(), c.default_value()))
+                .map(|key| (key.to_owned(), control.default_value()))
         })
         .collect::<HashMap<_, _>>();
+    let mut defaults = defaults;
+    collect_nested_defaults(&root, &mut defaults);
+    let readable = scope
+        .iter()
+        .filter(|(_, binding)| binding.direction.reads())
+        .map(|(name, binding)| (name.as_str(), binding.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut used_inputs = HashSet::new();
+    collect_template_inputs(&root, &readable, &mut used_inputs);
+    used_inputs.extend(def.view_inputs.iter().map(|name| (*name).to_owned()));
+    let mut inputs = readable
+        .iter()
+        .filter(|(name, _)| used_inputs.contains(**name))
+        .map(|(_, binding)| binding.clone())
+        .collect::<Vec<_>>();
+    inputs.sort_by_key(|binding| binding.name);
     Ok(Page {
         root,
         controls,
         defaults,
         mobile_breakpoint: def.mobile_breakpoint,
         output_formatter: def.output_formatter,
+        inputs,
+        renderer: def.renderer,
     })
 }
-fn compile_component(
-    def: &Definition,
-    scope: &HashMap<String, Binding>,
-    path: &str,
-    controls: &mut Vec<Control>,
-    seen: &mut HashSet<String>,
-) -> Result<Element, String> {
-    compile_element(&def.template, def, scope, path, controls, seen)
+
+fn collect_template_inputs(
+    element: &Element,
+    readable: &HashMap<&str, Binding>,
+    inputs: &mut HashSet<String>,
+) {
+    for name in ["data-in", "data-in-out"] {
+        if let Some(binding) = element.attr(name)
+            && readable.contains_key(binding)
+        {
+            inputs.insert(binding.to_owned());
+        }
+    }
+    if let Some(arguments) = element.attr("data-args") {
+        for token in arguments
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .filter(|token| !token.is_empty())
+        {
+            if readable.contains_key(token) {
+                inputs.insert(token.to_owned());
+            }
+        }
+    }
+    for child in &element.children {
+        if let Node::Element(child) = child {
+            collect_template_inputs(child, readable, inputs);
+        }
+    }
+}
+
+fn collect_nested_defaults(element: &Element, defaults: &mut HashMap<String, Value>) {
+    if let Some(component) = &element.component {
+        defaults.extend(component.page.defaults.clone());
+    }
+    for child in &element.children {
+        if let Node::Element(child) = child {
+            collect_nested_defaults(child, defaults);
+        }
+    }
 }
 fn resolve_expr(
     expr: &str,
@@ -280,6 +359,23 @@ fn compile_element(
     seen: &mut HashSet<String>,
 ) -> Result<Element, String> {
     let tag = element.tag.clone();
+    if !matches!(
+        tag.as_str(),
+        "div"
+            | "body"
+            | "component"
+            | "output"
+            | "rsc-value"
+            | "input"
+            | "select"
+            | "button"
+            | "option"
+            | "rsc-if"
+            | "rsc-then"
+            | "rsc-else"
+    ) {
+        return Err(format!("<{tag}> is not a supported GPUI element"));
+    }
     let attrs: HashMap<String, String> = element.attrs.iter().cloned().collect();
     let attr = |k: &str| attrs.get(k).map(String::as_str);
     if tag == "component" {
@@ -310,15 +406,20 @@ fn compile_element(
             }
         }
         let instance = format!("{path}/{name}-{}", seen.len());
-        let child_root = compile_component(child, &child_scope, &instance, controls, seen)?;
+        seen.insert(format!("{instance}/component"));
+        let child_page = compile_component(child, &child_scope, &instance)?;
         return Ok(Element {
-            tag: "div".into(),
+            tag: "component".into(),
             render: element.render,
             attrs,
-            children: vec![Node::Element(child_root)],
+            children: vec![],
             binding: None,
             args: vec![],
             control_id: None,
+            component: Some(ComponentInstance {
+                id: instance,
+                page: Box::new(child_page),
+            }),
         });
     }
     let bindings = ["data-in", "data-out", "data-in-out"]
@@ -332,6 +433,9 @@ fn compile_element(
     let mut control_id = None;
     let mut args = Vec::new();
     if let Some((kind, name)) = bindings.first().copied() {
+        if kind == "data-in" && !matches!(tag.as_str(), "output" | "rsc-value" | "rsc-if") {
+            return Err(format!("data-in on <{tag}> requires an output element"));
+        }
         let source = scope
             .get(name)
             .ok_or_else(|| format!("unknown {kind}=\"{name}\" in {}", def.name))?;
@@ -374,33 +478,37 @@ fn compile_element(
                 }
                 "select" => {
                     let options_key = attr("id").unwrap_or(&id);
-                    let options = def.select_options.get(options_key).cloned().unwrap_or_else(|| {
-                        element
-                            .children
-                            .iter()
-                            .filter_map(|child| match child {
-                                TemplateNode::Element(e) if e.tag == "option" => {
-                                    let label = e
-                                        .children
-                                        .iter()
-                                        .find_map(|node| match node {
-                                            TemplateNode::Text(text) => Some(text.clone()),
-                                            _ => None,
-                                        })
-                                        .unwrap_or_default();
-                                    Some(SelectOption {
-                                        value: e
-                                            .attr("value")
-                                            .map(str::to_owned)
-                                            .unwrap_or_else(|| label.clone()),
-                                        label,
-                                        selected: e.attr("selected").is_some(),
+                    let options =
+                        def.select_options
+                            .get(options_key)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                element
+                                    .children
+                                    .iter()
+                                    .filter_map(|child| match child {
+                                        TemplateNode::Element(e) if e.tag == "option" => {
+                                            let label = e
+                                                .children
+                                                .iter()
+                                                .find_map(|node| match node {
+                                                    TemplateNode::Text(text) => Some(text.clone()),
+                                                    _ => None,
+                                                })
+                                                .unwrap_or_default();
+                                            Some(SelectOption {
+                                                value: e
+                                                    .attr("value")
+                                                    .map(str::to_owned)
+                                                    .unwrap_or_else(|| label.clone()),
+                                                label,
+                                                selected: e.attr("selected").is_some(),
+                                            })
+                                        }
+                                        _ => None,
                                     })
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                    });
+                                    .collect::<Vec<_>>()
+                            });
                     let default = options
                         .iter()
                         .find(|option| option.selected)
@@ -431,6 +539,19 @@ fn compile_element(
         }
         binding = Some(source);
     }
+    if tag == "input" && control_id.is_none() {
+        return Err("<input> needs type=\"range\" and data-in-out".into());
+    }
+    if tag == "select" && control_id.is_none() {
+        return Err("<select> needs data-in-out".into());
+    }
+    if tag == "button"
+        && binding
+            .as_ref()
+            .is_none_or(|binding| !binding.direction.writes())
+    {
+        return Err("<button> needs data-out".into());
+    }
     let mut children = Vec::new();
     for child in &element.children {
         match child {
@@ -451,6 +572,7 @@ fn compile_element(
         binding,
         args,
         control_id,
+        component: None,
     })
 }
 pub use gpui::{Length, StyleRefinement as InlineStyle};

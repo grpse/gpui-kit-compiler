@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "debug-fps")]
 use std::time::Duration;
 #[cfg(feature = "debug-fps")]
 use std::time::Instant;
 
 use crate::runtime::binding::{self, Control, Element, InlineStyle, Node, Page};
-use crate::runtime::{Definition, Engine, OutputFormatter, Snapshot, Value};
+use crate::runtime::{ComponentProps, Definition, Engine, OutputFormatter, Snapshot, Value};
 use gpui_kit::component::{
     IndexPath, TitleBar,
     button::{Button, ButtonVariants},
@@ -15,14 +15,66 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum StartupWindowState {
+    #[default]
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum StartupDecorations {
+    Server,
+    #[default]
+    Client,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StartupConfig {
+    pub width: f32,
+    pub height: f32,
+    pub min_width: Option<f32>,
+    pub min_height: Option<f32>,
+    pub state: StartupWindowState,
+    pub decorations: StartupDecorations,
+    pub resizable: bool,
+    pub minimizable: bool,
+    pub movable: bool,
+    pub focus: bool,
+    pub show: bool,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            width: 1240.0,
+            height: 870.0,
+            min_width: None,
+            min_height: None,
+            state: StartupWindowState::Windowed,
+            decorations: StartupDecorations::Client,
+            resizable: true,
+            minimizable: true,
+            movable: true,
+            focus: true,
+            show: true,
+        }
+    }
+}
+
 pub struct HtmlView {
     title: String,
     page: Page,
     engine: Engine,
     snapshot: Snapshot,
+    props: ComponentProps,
+    embedded: bool,
     sliders: HashMap<String, Entity<SliderState>>,
     selects: HashMap<String, Entity<SelectState<Vec<String>>>>,
     subscriptions: Vec<Subscription>,
+    component_views: HashMap<String, Entity<HtmlView>>,
+    rendered_component_ids: HashSet<String>,
     #[cfg(feature = "debug-fps")]
     fps_overlay: Entity<FpsOverlay>,
 }
@@ -83,8 +135,29 @@ impl HtmlView {
         cx: &mut Context<Self>,
     ) -> Self {
         let engine = Engine::start(page.defaults.clone(), calculate, on_change);
+        Self::new_with_engine(page, title, engine, false, window, cx)
+    }
+
+    fn new_component(
+        page: Page,
+        engine: Engine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_engine(page, String::new(), engine, true, window, cx)
+    }
+
+    fn new_with_engine(
+        page: Page,
+        title: String,
+        engine: Engine,
+        embedded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let updates = (!page.inputs.is_empty()).then(|| engine.subscribe());
         let snapshot = engine.snapshot();
-        let updates = engine.subscribe();
+        let props = page.props(&snapshot);
         #[cfg(feature = "debug-fps")]
         let fps_overlay = cx.new(|_| FpsOverlay {
             since: Instant::now(),
@@ -96,9 +169,13 @@ impl HtmlView {
             page,
             engine,
             snapshot,
+            props,
+            embedded,
             sliders: HashMap::new(),
             selects: HashMap::new(),
             subscriptions: Vec::new(),
+            component_views: HashMap::new(),
+            rendered_component_ids: HashSet::new(),
             #[cfg(feature = "debug-fps")]
             fps_overlay,
         };
@@ -106,43 +183,52 @@ impl HtmlView {
         let initial = view.snapshot.clone();
         view.sync_controls(&initial, true, window, cx);
         #[cfg(feature = "debug-fps")]
-        sample_fps(window, view.fps_overlay.clone());
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                let receiver = updates.clone();
-                let next = cx
-                    .background_spawn(async move {
-                        receiver
-                            .lock()
-                            .expect("update receiver lock poisoned")
-                            .recv()
-                    })
-                    .await;
-                let Ok(mut next) = next else {
-                    break;
-                };
-                while let Ok(latest) = updates
-                    .lock()
-                    .expect("update receiver lock poisoned")
-                    .try_recv()
-                {
-                    next = latest;
+        if !view.embedded {
+            sample_fps(window, view.fps_overlay.clone());
+        }
+        if let Some(updates) = updates {
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    let receiver = updates.clone();
+                    let next = cx
+                        .background_spawn(async move {
+                            receiver
+                                .lock()
+                                .expect("update receiver lock poisoned")
+                                .recv()
+                        })
+                        .await;
+                    let Ok(mut next) = next else {
+                        break;
+                    };
+                    while let Ok(latest) = updates
+                        .lock()
+                        .expect("update receiver lock poisoned")
+                        .try_recv()
+                    {
+                        next = latest;
+                    }
+                    if this
+                        .update_in(cx, |view, window, cx| view.apply_snapshot(next, window, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-                if this
-                    .update_in(cx, |view, window, cx| view.apply_snapshot(next, window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+            })
+            .detach();
+        }
         view
     }
 
     fn apply_snapshot(&mut self, next: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
+        let next_props = self.page.props(&next);
+        if next_props == self.props {
+            return;
+        }
         self.sync_controls(&next, false, window, cx);
         self.snapshot = next;
+        self.props = next_props;
         cx.notify();
     }
 
@@ -187,10 +273,7 @@ impl HtmlView {
                         .iter()
                         .position(|option| option.value == default)
                         .unwrap_or(0);
-                    let labels = options
-                        .iter()
-                        .map(|option| option.label.clone())
-                        .collect();
+                    let labels = options.iter().map(|option| option.label.clone()).collect();
                     let state = cx.new(|cx| {
                         SelectState::new(
                             labels,
@@ -246,20 +329,26 @@ impl HtmlView {
                         .unwrap_or(value),
                     Control::Range { .. } => value,
                 };
-                state.update(cx, |select, cx| select.set_selected_value(&label, window, cx));
+                state.update(cx, |select, cx| {
+                    select.set_selected_value(&label, window, cx)
+                });
             }
         }
     }
 
     pub fn render_node(
-        &self,
+        &mut self,
         node: &Node,
+        props: &ComponentProps,
         viewport_width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
             Node::Text(value) => div().child(value.clone()).into_any_element(),
-            Node::Element(element) => self.render_element(element, viewport_width, cx),
+            Node::Element(element) => {
+                self.render_element(element, props, viewport_width, window, cx)
+            }
         }
     }
 
@@ -271,19 +360,57 @@ impl HtmlView {
     }
 
     fn render_element(
-        &self,
+        &mut self,
         element: &Element,
+        props: &ComponentProps,
         viewport_width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        element
+        let render = element
             .render
-            .expect("compiled element needs a GPUI renderer")(
-            self,
-            element,
-            viewport_width,
-            cx,
-        )
+            .expect("compiled element needs a GPUI renderer");
+        render(self, element, props, viewport_width, window, cx)
+    }
+
+    pub fn render_root(
+        &mut self,
+        props: &ComponentProps,
+        viewport_width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let root = self.page.root.clone();
+        div()
+            .w_full()
+            .child(self.render_node(&Node::Element(root), props, viewport_width, window, cx))
+            .into_any_element()
+    }
+
+    pub fn render_component(
+        &mut self,
+        element: &Element,
+        viewport_width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let instance = element
+            .component
+            .as_ref()
+            .expect("compiled component element needs a component instance");
+        let id = instance.id.clone();
+        self.rendered_component_ids.insert(id.clone());
+        let page = instance.page.clone();
+        let child = if let Some(child) = self.component_views.get(&id) {
+            child.clone()
+        } else {
+            let engine = self.engine.clone();
+            let child = cx.new(|cx| Self::new_component(*page, engine, window, cx));
+            self.component_views.insert(id, child.clone());
+            child
+        };
+        let _ = viewport_width;
+        child.into_any_element()
     }
 
     pub fn is_mobile(&self, viewport_width: f32) -> bool {
@@ -355,10 +482,12 @@ impl HtmlView {
     }
 
     pub fn render_if(
-        &self,
+        &mut self,
         element: &Element,
+        props: &ComponentProps,
         mut container: Div,
         viewport_width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let selected_branch = match element
@@ -366,9 +495,7 @@ impl HtmlView {
             .as_ref()
             .and_then(|binding| binding.get(&self.snapshot))
         {
-            Some(Value::Text(value))
-                if element.attr("data-rsc-equals") == Some(value.as_str()) =>
-            {
+            Some(Value::Text(value)) if element.attr("data-rsc-equals") == Some(value.as_str()) => {
                 "rsc-then"
             }
             _ => "rsc-else",
@@ -376,7 +503,8 @@ impl HtmlView {
         for child in &element.children {
             if let Node::Element(branch) = child {
                 if branch.tag == selected_branch {
-                    container = container.child(self.render_node(child, viewport_width, cx));
+                    container =
+                        container.child(self.render_node(child, props, viewport_width, window, cx));
                 }
             }
         }
@@ -415,8 +543,16 @@ impl HtmlView {
 impl Render for HtmlView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport_width = f32::from(window.viewport_size().width);
-        let root = self.render_element(&self.page.root, viewport_width, cx);
-        let view = div()
+        let props = self.props.clone();
+        let render_component = self.page.renderer;
+        self.rendered_component_ids.clear();
+        let root = render_component(self, &props, viewport_width, window, cx);
+        self.component_views
+            .retain(|id, _| self.rendered_component_ids.contains(id));
+        if self.embedded {
+            return div().w_full().child(root);
+        }
+        div()
             .relative()
             .flex()
             .flex_col()
@@ -441,8 +577,7 @@ impl Render for HtmlView {
                 {
                     view
                 }
-            });
-        view
+            })
     }
 }
 
@@ -462,6 +597,10 @@ fn display_value(
 }
 
 pub fn run(definition: Definition) {
+    run_with_config(definition, StartupConfig::default());
+}
+
+pub fn run_with_config(definition: Definition, startup: StartupConfig) {
     let calculate = definition
         .calculate
         .expect("root component needs calculate callback");
@@ -476,11 +615,30 @@ pub fn run(definition: Definition) {
     }
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
-        let bounds = Bounds::centered(None, size(px(1240.0), px(870.0)), cx);
+        let restore_bounds =
+            Bounds::centered(None, size(px(startup.width), px(startup.height)), cx);
+        let window_bounds = match startup.state {
+            StartupWindowState::Windowed => WindowBounds::Windowed(restore_bounds),
+            StartupWindowState::Maximized => WindowBounds::Maximized(restore_bounds),
+            StartupWindowState::Fullscreen => WindowBounds::Fullscreen(restore_bounds),
+        };
+        let decorations = match startup.decorations {
+            StartupDecorations::Server => WindowDecorations::Server,
+            StartupDecorations::Client => WindowDecorations::Client,
+        };
         open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_decorations: Some(WindowDecorations::Client),
+                window_bounds: Some(window_bounds),
+                window_min_size: startup
+                    .min_width
+                    .zip(startup.min_height)
+                    .map(|(width, height)| size(px(width), px(height))),
+                window_decorations: Some(decorations),
+                is_resizable: startup.resizable,
+                is_minimizable: startup.minimizable,
+                is_movable: startup.movable,
+                focus: startup.focus,
+                show: startup.show,
                 titlebar: Some(TitlebarOptions {
                     title: Some(title.clone().into()),
                     ..TitleBar::title_bar_options()

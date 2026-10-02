@@ -6,23 +6,25 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).parent
-OUTPUT = ROOT / "dist" / "gpui-rsc-syntax-0.1.0.vsix"
+OUTPUT = ROOT / "dist" / "gpui-rsc-syntax-0.2.0.vsix"
 CONTENT_TYPES = '''<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="json" ContentType="application/json" />
+  <Default Extension="js" ContentType="application/javascript" />
   <Default Extension="vsixmanifest" ContentType="text/xml" />
   <Override PartName="/extension.vsixmanifest" ContentType="text/xml" />
   <Override PartName="/extension/package.json" ContentType="application/json" />
+  <Override PartName="/extension/extension.js" ContentType="application/javascript" />
   <Override PartName="/extension/syntaxes/gpui-rsc.tmLanguage.json" ContentType="application/json" />
 </Types>
 '''
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
-    <Identity Language="en-US" Id="gpui-rsc-syntax" Version="0.1.0" Publisher="local" />
-    <DisplayName>GPUI RSC Syntax</DisplayName>
-    <Description>HTML and Rust syntax coloring for .rsc components.</Description>
-    <Tags>rsc;rust;html</Tags>
+    <Identity Language="en-US" Id="gpui-rsc-syntax" Version="0.2.0" Publisher="local" />
+    <DisplayName>GPUI RSX Syntax</DisplayName>
+    <Description>Rust-aware syntax highlighting, GPUI completions, and markup formatting for .rsx components.</Description>
+    <Tags>rsx;rust;html</Tags>
     <Categories><Category>Programming Languages</Category></Categories>
     <Properties>
       <Property Id="Microsoft.VisualStudio.Code.Engine" Value=">=1.85.0" />
@@ -46,6 +48,7 @@ def main() -> None:
         package.writestr("[Content_Types].xml", CONTENT_TYPES)
         package.writestr("extension.vsixmanifest", MANIFEST)
         package.write(ROOT / "package.json", "extension/package.json")
+        package.write(ROOT / "extension.js", "extension/extension.js")
         package.write(
             ROOT / "syntaxes" / "gpui-rsc.tmLanguage.json",
             "extension/syntaxes/gpui-rsc.tmLanguage.json",
