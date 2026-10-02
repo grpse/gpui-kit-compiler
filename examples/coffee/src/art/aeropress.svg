@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="260" viewBox="0 0 360 260">
+  <defs>
+    <linearGradient id="chamber"><stop stop-color="#ddd8c6" stop-opacity=".8"/><stop offset=".5" stop-color="#f5eee0" stop-opacity=".65"/><stop offset="1" stop-color="#b2aaa0" stop-opacity=".8"/></linearGradient>
+    <linearGradient id="coffee" x2="0" y2="1"><stop stop-color="#ba793f"/><stop offset="1" stop-color="#623a25"/></linearGradient>
+    <linearGradient id="mug" x2="0" y2="1"><stop stop-color="#fffdf5"/><stop offset="1" stop-color="#d2c5ad"/></linearGradient>
+  </defs>
+  <ellipse cx="180" cy="248" rx="98" ry="8" fill="#b6a589" opacity=".35"/>
+  <rect x="159" y="14" width="42" height="79" rx="5" fill="#42413e" stroke="#82786d" stroke-width="3"/>
+  <path d="M167 23v61m27-61v61" stroke="#807b70" stroke-width="3" opacity=".75"/>
+  <rect x="151" y="9" width="58" height="14" rx="7" fill="#41403c" stroke="#938a7b" stroke-width="2"/>
+  <rect x="153" y="83" width="54" height="14" rx="5" fill="#3e3b37"/>
+  <rect x="144" y="93" width="72" height="89" rx="6" fill="url(#chamber)" stroke="#5e5a50" stroke-width="3"/>
+  <path d="M151 131h58v44h-58z" fill="url(#coffee)" opacity=".84"/>
+  <path d="M153 132c17-4 37-4 54 0" fill="none" stroke="#d49b62" stroke-width="3"/>
+  <path d="M154 100v72" stroke="#fff9eb" stroke-width="4" opacity=".75"/>
+  <path d="M202 101v70" stroke="#817f74" stroke-width="2" opacity=".5"/>
+  <path d="M158 111h10m-10 14h10m-10 28h10" stroke="#666057" stroke-width="2"/>
+  <text x="173" y="115" fill="#6a6258" font-family="sans-serif" font-size="8" font-weight="bold">4</text>
+  <text x="173" y="130" fill="#6a6258" font-family="sans-serif" font-size="8" font-weight="bold">3</text>
+  <text x="173" y="158" fill="#e0ba86" font-family="sans-serif" font-size="8" font-weight="bold">2</text>
+  <path d="M137 176h86v9h-86z" fill="#4e4a42" stroke="#92887a" stroke-width="2"/>
+  <path d="M150 184h60v7h-60z" fill="#b7a58d" stroke="#6c5d4d" stroke-width="2"/>
+  <path d="M151 191h58l-5 46c-1 7-6 10-13 10h-24c-7 0-12-3-13-10z" fill="url(#mug)" stroke="#8b7965" stroke-width="3"/>
+  <path d="M158 218h44l-2 16c0 4-4 7-9 7h-24c-5 0-9-3-9-7z" fill="url(#coffee)"/>
+  <path d="M208 198h17c17 0 18 31-2 32h-16" fill="none" stroke="#8b7965" stroke-width="7"/>
+  <path d="M208 203h16c10 0 10 20 0 20h-16" fill="none" stroke="#faf3e4" stroke-width="3"/>
+  <path d="M180 186v11" stroke="#754126" stroke-width="3" stroke-linecap="round"/>
+  <path d="M110 94v17m-8-8h16M258 144v13m-6-6h12" stroke="#bca688" stroke-width="2"/>
+</svg>

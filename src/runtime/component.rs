@@ -74,6 +74,28 @@ pub struct Definition {
 }
 
 impl Definition {
+    /// Register a renderer written directly in Rust. Its readable bindings are
+    /// passed through `ComponentProps`, just like inputs to an RSX component.
+    /// Import the definition function and use its name as an uppercase RSX tag.
+    pub fn native(
+        name: &'static str,
+        bindings: Vec<Binding>,
+        view_inputs: &'static [&'static str],
+        renderer: crate::ComponentRenderFn,
+    ) -> Self {
+        // Native definitions do not use the template to paint; a valid empty
+        // root still lets the normal binding compiler validate their inputs.
+        let mut definition = Self::new(
+            name,
+            name,
+            TemplateElement::new("div", vec![], vec![]),
+            bindings,
+            renderer,
+        );
+        definition.view_inputs = view_inputs;
+        definition
+    }
+
     pub fn new(
         name: &'static str,
         title: &'static str,

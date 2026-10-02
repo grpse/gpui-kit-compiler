@@ -1,3 +1,5 @@
+mod native_preview;
+
 mod generated {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -53,6 +55,70 @@ mod tests {
         );
         page.bind_signals(&engine);
         (page, engine)
+    }
+
+    fn native_preview_page(element: &Element) -> Option<&Page> {
+        if let Some(component) = &element.component {
+            if component.page.root.children.is_empty()
+                && component
+                    .page
+                    .inputs
+                    .iter()
+                    .any(|input| input.name == "method")
+                && component
+                    .page
+                    .inputs
+                    .iter()
+                    .any(|input| input.name == "water")
+            {
+                return Some(&component.page);
+            }
+            if let Some(page) = native_preview_page(&component.page.root) {
+                return Some(page);
+            }
+        }
+        element.children.iter().find_map(|child| match child {
+            Node::Element(child) => native_preview_page(child),
+            Node::Text(_) => None,
+        })
+    }
+
+    #[test]
+    fn native_illustration_receives_recipe_changes() {
+        let (page, engine) = setup();
+        let preview = native_preview_page(&page.root).expect("native illustration page");
+        let updates = engine.subscribe();
+        page.signals
+            .iter()
+            .find(|(key, _)| key == "method")
+            .unwrap()
+            .1
+            .set("Espresso");
+        let changed = updates
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(
+            preview.props(&changed).get("method"),
+            Some(&Value::from("Espresso"))
+        );
+
+        page.signals
+            .iter()
+            .find(|(key, _)| key == "water")
+            .unwrap()
+            .1
+            .set(420.0);
+        let changed = updates
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(
+            preview.props(&changed).get("water"),
+            Some(&Value::Number(420.0))
+        );
     }
 
     #[test]

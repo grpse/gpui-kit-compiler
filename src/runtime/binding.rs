@@ -62,16 +62,42 @@ pub enum Control {
         options: Vec<SelectOption>,
         default: String,
     },
+    Text {
+        id: String,
+        binding: Binding,
+        default: String,
+        multiline: bool,
+        placeholder: String,
+        masked: bool,
+    },
+    Date {
+        id: String,
+        binding: Binding,
+        default: Option<String>,
+    },
+    Checkbox {
+        id: String,
+        binding: Binding,
+        default: bool,
+    },
 }
 impl Control {
     pub fn id(&self) -> &str {
         match self {
-            Self::Range { id, .. } | Self::Select { id, .. } => id,
+            Self::Range { id, .. }
+            | Self::Select { id, .. }
+            | Self::Text { id, .. }
+            | Self::Date { id, .. }
+            | Self::Checkbox { id, .. } => id,
         }
     }
     pub fn binding(&self) -> &Binding {
         match self {
-            Self::Range { binding, .. } | Self::Select { binding, .. } => binding,
+            Self::Range { binding, .. }
+            | Self::Select { binding, .. }
+            | Self::Text { binding, .. }
+            | Self::Date { binding, .. }
+            | Self::Checkbox { binding, .. } => binding,
         }
     }
     pub fn default_value(&self) -> Option<Value> {
@@ -82,6 +108,9 @@ impl Control {
             } => Some(Value::Number(*default)),
             Self::Range { default: None, .. } => None,
             Self::Select { default, .. } => Some(Value::Text(default.clone())),
+            Self::Text { default, .. } => Some(Value::Text(default.clone())),
+            Self::Date { default, .. } => default.clone().map(Value::Text),
+            Self::Checkbox { default, .. } => Some(Value::from(*default)),
         }
     }
 }
@@ -419,6 +448,9 @@ fn compile_element(
     seen: &mut HashSet<String>,
 ) -> Result<Element, String> {
     let tag = element.tag.clone();
+    if tag == "video" {
+        return Err("<video> is not supported by GPUI Kit 0.7; use a native component backed by a video renderer".into());
+    }
     if !matches!(
         tag.as_str(),
         "div"
@@ -427,6 +459,9 @@ fn compile_element(
             | "output"
             | "rsc-value"
             | "input"
+            | "textarea"
+            | "img"
+            | "progress"
             | "select"
             | "button"
             | "option"
@@ -438,6 +473,26 @@ fn compile_element(
     }
     let attrs: HashMap<String, String> = element.attrs.iter().cloned().collect();
     let attr = |k: &str| attrs.get(k).map(String::as_str);
+    if tag == "img" && attr("src").is_none() && attr("data-in").is_none() {
+        return Err("<img> needs a src attribute".into());
+    }
+    if tag == "img" {
+        if let Some(fit) = attr("object-fit") {
+            if !matches!(fit, "contain" | "cover" | "fill" | "scale-down" | "none") {
+                return Err(format!("<img> has unsupported object-fit {fit:?}"));
+            }
+        }
+        for name in ["width", "height"] {
+            if let Some(value) = attr(name) {
+                if !value
+                    .parse::<f32>()
+                    .is_ok_and(|value| value.is_finite() && value > 0.0)
+                {
+                    return Err(format!("<img> needs a positive numeric {name}"));
+                }
+            }
+        }
+    }
     if tag == "component" {
         let name = attr("name").ok_or("<component> needs name")?;
         let child = def
@@ -502,7 +557,12 @@ fn compile_element(
     let mut control_id = None;
     let mut args = Vec::new();
     if let Some((kind, name)) = declared_binding {
-        if kind == "data-in" && !matches!(tag.as_str(), "output" | "rsc-value" | "rsc-if") {
+        if kind == "data-in"
+            && !matches!(
+                tag.as_str(),
+                "output" | "rsc-value" | "rsc-if" | "img" | "progress"
+            )
+        {
             return Err(format!("data-in on <{tag}> requires an output element"));
         }
         let source = scope
@@ -597,7 +657,63 @@ fn compile_element(
                         default,
                     });
                 }
-                _ => return Err(format!("{kind} on <{tag}> requires range input or select")),
+                "input"
+                    if matches!(
+                        attr("type").unwrap_or("text"),
+                        "text" | "email" | "password" | "search" | "url" | "tel"
+                    ) =>
+                {
+                    controls.push(Control::Text {
+                        id: id.clone(),
+                        binding: source.clone(),
+                        default: attr("value").unwrap_or("").to_owned(),
+                        multiline: false,
+                        placeholder: attr("placeholder").unwrap_or("").to_owned(),
+                        masked: attr("type") == Some("password"),
+                    });
+                }
+                "textarea" => {
+                    controls.push(Control::Text {
+                        id: id.clone(),
+                        binding: source.clone(),
+                        default: element
+                            .children
+                            .iter()
+                            .filter_map(|child| match child {
+                                TemplateNode::Text(text) => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>(),
+                        multiline: true,
+                        placeholder: attr("placeholder").unwrap_or("").to_owned(),
+                        masked: false,
+                    });
+                }
+                "input" if attr("type") == Some("date") => {
+                    let default = attr("value").map(str::to_owned);
+                    if default.as_deref().is_some_and(|value| {
+                        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err()
+                    }) {
+                        return Err(format!("{id} needs a valid YYYY-MM-DD date"));
+                    }
+                    controls.push(Control::Date {
+                        id: id.clone(),
+                        binding: source.clone(),
+                        default,
+                    });
+                }
+                "input" if attr("type") == Some("checkbox") => {
+                    controls.push(Control::Checkbox {
+                        id: id.clone(),
+                        binding: source.clone(),
+                        default: attr("checked").is_some(),
+                    });
+                }
+                _ => {
+                    return Err(format!(
+                        "{kind} on <{tag}> requires a supported input, textarea, or select"
+                    ));
+                }
             }
             control_id = Some(id);
         } else if direction == Direction::Out {
@@ -613,9 +729,9 @@ fn compile_element(
         binding = Some(source);
     }
     if tag == "input" && control_id.is_none() {
-        return Err("<input> needs type=\"range\" and value={binding} or data-in-out".into());
+        return Err("<input> needs a supported type and value={binding} or data-in-out".into());
     }
-    if tag == "select" && control_id.is_none() {
+    if matches!(tag.as_str(), "select" | "textarea") && control_id.is_none() {
         return Err("<select> needs value={binding} or data-in-out".into());
     }
     if tag == "button"

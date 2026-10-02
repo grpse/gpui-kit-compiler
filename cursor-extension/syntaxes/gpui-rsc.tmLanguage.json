@@ -180,7 +180,7 @@
       "name": "meta.tag.sgml.doctype.html"
     },
     "html-tag": {
-      "begin": "(<)(/?)(div|button|input|select|option|output)(?=[\\s/>])",
+      "begin": "(<)(/?)(div|button|input|textarea|img|progress|select|option|output)(?=[\\s/>])",
       "beginCaptures": {
         "1": { "name": "punctuation.definition.tag.begin.html" },
         "2": { "name": "punctuation.definition.tag.html" },

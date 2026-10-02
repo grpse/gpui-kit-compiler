@@ -7,8 +7,12 @@ use std::time::Instant;
 use crate::runtime::binding::{self, Control, Element, InlineStyle, Node, Page};
 use crate::runtime::{ComponentProps, Definition, Engine, OutputFormatter, Snapshot, Value};
 use gpui_kit::component::{
-    IndexPath, TitleBar,
+    Disableable, IndexPath, TitleBar,
     button::{Button, ButtonVariants},
+    checkbox::Checkbox,
+    date_picker::{DatePicker, DatePickerEvent, DatePickerState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    progress::Progress,
     select::{Select, SelectEvent, SelectState},
     slider::{Slider, SliderEvent, SliderState},
 };
@@ -72,6 +76,9 @@ pub struct HtmlView {
     embedded: bool,
     sliders: HashMap<String, Entity<SliderState>>,
     selects: HashMap<String, Entity<SelectState<Vec<String>>>>,
+    text_inputs: HashMap<String, Entity<InputState>>,
+    textareas: HashMap<String, Entity<TextareaState>>,
+    dates: HashMap<String, Entity<DatePickerState>>,
     subscriptions: Vec<Subscription>,
     component_views: HashMap<String, Entity<HtmlView>>,
     rendered_component_ids: HashSet<String>,
@@ -179,6 +186,9 @@ impl HtmlView {
             embedded,
             sliders: HashMap::new(),
             selects: HashMap::new(),
+            text_inputs: HashMap::new(),
+            textareas: HashMap::new(),
+            dates: HashMap::new(),
             subscriptions: Vec::new(),
             component_views: HashMap::new(),
             rendered_component_ids: HashSet::new(),
@@ -272,6 +282,9 @@ impl HtmlView {
         self.subscriptions.clear();
         self.sliders.clear();
         self.selects.clear();
+        self.text_inputs.clear();
+        self.textareas.clear();
+        self.dates.clear();
         for control in self.page.controls.clone() {
             match control {
                 Control::Range {
@@ -334,6 +347,79 @@ impl HtmlView {
                     ));
                     self.selects.insert(id, state);
                 }
+                Control::Text {
+                    id,
+                    binding,
+                    default,
+                    multiline,
+                    placeholder,
+                    masked,
+                } => {
+                    if multiline {
+                        let state = cx.new(|cx| {
+                            TextareaState::new(window, cx)
+                                .default_value(default)
+                                .placeholder(placeholder)
+                        });
+                        let input = state.clone();
+                        self.subscriptions.push(cx.subscribe(
+                            &state,
+                            move |view, _, event: &InputEvent, cx| {
+                                if matches!(event, InputEvent::Change) {
+                                    binding.set(
+                                        &view.engine,
+                                        Value::Text(input.read(cx).value().to_string()),
+                                    );
+                                }
+                            },
+                        ));
+                        self.textareas.insert(id, state);
+                    } else {
+                        let state = cx.new(|cx| {
+                            InputState::new(window, cx)
+                                .default_value(default)
+                                .placeholder(placeholder)
+                                .masked(masked)
+                        });
+                        let input = state.clone();
+                        self.subscriptions.push(cx.subscribe(
+                            &state,
+                            move |view, _, event: &InputEvent, cx| {
+                                if matches!(event, InputEvent::Change) {
+                                    binding.set(
+                                        &view.engine,
+                                        Value::Text(input.read(cx).value().to_string()),
+                                    );
+                                }
+                            },
+                        ));
+                        self.text_inputs.insert(id, state);
+                    }
+                }
+                Control::Date {
+                    id,
+                    binding,
+                    default,
+                } => {
+                    let state =
+                        cx.new(|cx| DatePickerState::new(window, cx).date_format("%Y-%m-%d"));
+                    if let Some(date) = default.as_deref().and_then(parse_date) {
+                        state.update(cx, |picker, cx| picker.set_date(date, window, cx));
+                    }
+                    self.subscriptions.push(cx.subscribe(
+                        &state,
+                        move |view, _, event: &DatePickerEvent, _| {
+                            let DatePickerEvent::Change(value) = event;
+                            let text = value
+                                .start()
+                                .map(|date| date.date().format("%Y-%m-%d").to_string())
+                                .unwrap_or_default();
+                            binding.set(&view.engine, Value::Text(text));
+                        },
+                    ));
+                    self.dates.insert(id, state);
+                }
+                Control::Checkbox { .. } => {}
             }
         }
     }
@@ -356,18 +442,43 @@ impl HtmlView {
             if let (Some(state), Some(value)) = (self.sliders.get(id), value.number()) {
                 state.update(cx, |slider, cx| slider.set_value(value, window, cx));
             }
-            if let (Some(state), Value::Text(value)) = (self.selects.get(id), value) {
+            if let (Some(state), Value::Text(value)) = (self.selects.get(id), &value) {
                 let label = match control {
                     Control::Select { options, .. } => options
                         .iter()
-                        .find(|option| option.value == value)
+                        .find(|option| option.value == *value)
                         .map(|option| option.label.clone())
-                        .unwrap_or(value),
-                    Control::Range { .. } => value,
+                        .unwrap_or_else(|| value.clone()),
+                    _ => value.clone(),
                 };
                 state.update(cx, |select, cx| {
                     select.set_selected_value(&label, window, cx)
                 });
+            }
+            if let Some(state) = self.text_inputs.get(id) {
+                let text = value.text();
+                if state.read(cx).value().as_ref() != text {
+                    state.update(cx, |input, cx| input.set_value(text, window, cx));
+                }
+            }
+            if let Some(state) = self.textareas.get(id) {
+                let text = value.text();
+                if state.read(cx).value().as_ref() != text {
+                    state.update(cx, |input, cx| input.set_value(text, window, cx));
+                }
+            }
+            if let Some(state) = self.dates.get(id) {
+                let date = parse_date(&value.text());
+                let current = state.read(cx).date_time().start().map(|value| value.date());
+                if current != date {
+                    state.update(cx, |picker, cx| {
+                        picker.set_date(
+                            gpui_kit::component::calendar::Date::Single(date),
+                            window,
+                            cx,
+                        )
+                    });
+                }
             }
         }
     }
@@ -574,6 +685,149 @@ impl HtmlView {
         button.style().refine(&style);
         container.child(button).into_any_element()
     }
+
+    pub fn render_input(
+        &self,
+        element: &Element,
+        container: Div,
+        style: InlineStyle,
+    ) -> AnyElement {
+        let key = element.control_id.as_deref().expect("input needs an id");
+        match element.attr("type").unwrap_or("text") {
+            "range" => self.render_slider(element, container, style),
+            "checkbox" => {
+                let checked = element
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.get(&self.snapshot))
+                    .is_some_and(|value| match value {
+                        Value::Text(value) => value == "true",
+                        Value::Number(value) => value != 0.0,
+                        Value::Arguments(_) => false,
+                    });
+                let binding = element
+                    .binding
+                    .as_ref()
+                    .expect("checkbox needs a binding")
+                    .clone();
+                let engine = self.engine.clone();
+                let mut checkbox = Checkbox::new(key.to_owned())
+                    .checked(checked)
+                    .disabled(element.attr("disabled").is_some())
+                    .on_change(move |checked, _, _| binding.set(&engine, Value::from(*checked)));
+                if let Some(label) = element.attr("aria-label") {
+                    checkbox = checkbox.accessibility_label(label.to_owned());
+                }
+                checkbox.style().refine(&style);
+                container.child(checkbox).into_any_element()
+            }
+            "date" => container
+                .w_full()
+                .when_some(self.dates.get(key), |container, state| {
+                    container.child(
+                        DatePicker::new(state)
+                            .placeholder(
+                                element
+                                    .attr("placeholder")
+                                    .unwrap_or("Select a date")
+                                    .to_owned(),
+                            )
+                            .disabled(element.attr("disabled").is_some()),
+                    )
+                })
+                .into_any_element(),
+            _ => container
+                .w_full()
+                .when_some(self.text_inputs.get(key), |container, state| {
+                    container.child(Input::new(state).disabled(element.attr("disabled").is_some()))
+                })
+                .into_any_element(),
+        }
+    }
+
+    pub fn render_textarea(&self, element: &Element, container: Div) -> AnyElement {
+        let key = element.control_id.as_deref().expect("textarea needs an id");
+        container
+            .w_full()
+            .when_some(self.textareas.get(key), |container, state| {
+                container.child(Textarea::new(state).disabled(element.attr("disabled").is_some()))
+            })
+            .into_any_element()
+    }
+
+    pub fn render_image(&self, element: &Element, style: InlineStyle) -> AnyElement {
+        let bound_source = element
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.get(&self.snapshot))
+            .map(|value| value.text());
+        let source = bound_source
+            .as_deref()
+            .or_else(|| element.attr("src"))
+            .unwrap_or_default();
+        let source = if source.starts_with("https://") || source.starts_with("http://") {
+            gpui::ImageSource::from(source.to_owned())
+        } else {
+            gpui::ImageSource::from(std::path::PathBuf::from(source))
+        };
+        let fit = match element.attr("object-fit").unwrap_or("contain") {
+            "cover" => ObjectFit::Cover,
+            "fill" => ObjectFit::Fill,
+            "scale-down" => ObjectFit::ScaleDown,
+            "none" => ObjectFit::None,
+            _ => ObjectFit::Contain,
+        };
+        let alt = element.attr("alt").unwrap_or_default().to_owned();
+        let mut image = img(source)
+            .object_fit(fit)
+            .with_fallback(move || div().child(alt.clone()).into_any_element());
+        if let Some(width) = element
+            .attr("width")
+            .and_then(|value| value.parse::<f32>().ok())
+        {
+            image = image.w(px(width));
+        }
+        if let Some(height) = element
+            .attr("height")
+            .and_then(|value| value.parse::<f32>().ok())
+        {
+            image = image.h(px(height));
+        }
+        image.style().refine(&style);
+        image.into_any_element()
+    }
+
+    pub fn render_progress(
+        &self,
+        element: &Element,
+        container: Div,
+        style: InlineStyle,
+    ) -> AnyElement {
+        let value = element
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.get(&self.snapshot))
+            .and_then(|value| value.number())
+            .or_else(|| {
+                element
+                    .attr("value")
+                    .and_then(|value| value.parse::<f32>().ok())
+            })
+            .unwrap_or(0.0);
+        let max = element
+            .attr("max")
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| *value > 0.0)
+            .unwrap_or(1.0);
+        let mut progress = Progress::new(element.attr("id").unwrap_or("progress").to_owned())
+            .value((value / max * 100.0).clamp(0.0, 100.0));
+        progress.style().refine(&style);
+        container.child(progress).into_any_element()
+    }
+}
+
+fn parse_date(value: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
 
 impl Render for HtmlView {

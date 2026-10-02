@@ -1,13 +1,11 @@
+#[cfg(feature = "runtime")]
+pub mod runtime;
 #[cfg(feature = "compiler")]
 mod style_codegen;
 #[cfg(feature = "runtime")]
 mod template;
 #[cfg(feature = "runtime")]
-pub mod runtime;
-#[cfg(feature = "runtime")]
-pub use template::{
-    ComponentRenderFn, CompiledComponent, RenderFn, TemplateElement, TemplateNode,
-};
+pub use template::{CompiledComponent, ComponentRenderFn, RenderFn, TemplateElement, TemplateNode};
 // Compiler for single-file Rust JSX components.
 #[cfg(feature = "compiler")]
 use quote::ToTokens;
@@ -1057,15 +1055,24 @@ pub fn compile_directory(directory: &Path, output: &Path) -> Result<Vec<PathBuf>
     }
     let mut outputs = Vec::new();
     for input in inputs {
-        let relative = input
-            .strip_prefix(directory)
-            .map_err(|error| format!("could not map {} into source root: {error}", input.display()))?;
+        let relative = input.strip_prefix(directory).map_err(|error| {
+            format!(
+                "could not map {} into source root: {error}",
+                input.display()
+            )
+        })?;
         let output_file = output.join(relative).with_extension("inter.rs");
         compile_file(&input, &output_file)?;
         outputs.push(output_file);
     }
-    let current_outputs = outputs.iter().cloned().collect::<std::collections::HashSet<_>>();
-    fn remove_stale(directory: &Path, current_outputs: &std::collections::HashSet<PathBuf>) -> Result<(), String> {
+    let current_outputs = outputs
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    fn remove_stale(
+        directory: &Path,
+        current_outputs: &std::collections::HashSet<PathBuf>,
+    ) -> Result<(), String> {
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1858,7 +1865,9 @@ fn extract_control_value_bindings(source: &str) -> Result<String, String> {
             .map(|offset| name_start + offset)
             .unwrap_or(tag.len());
         let name = &tag[name_start..name_end];
-        if !tag.starts_with("</") && matches!(name, "input" | "select") {
+        if !tag.starts_with("</")
+            && matches!(name, "input" | "select" | "textarea" | "img" | "progress")
+        {
             output.push_str(&extract_control_value_binding_tag(tag, name)?);
         } else {
             output.push_str(tag);
@@ -1871,6 +1880,14 @@ fn extract_control_value_bindings(source: &str) -> Result<String, String> {
 
 #[cfg(feature = "compiler")]
 fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, String> {
+    let read_only = matches!(name, "img" | "progress");
+    let target = if name == "img" {
+        "src"
+    } else if name == "input" && html_attribute(tag, "type").as_deref() == Some("checkbox") {
+        "checked"
+    } else {
+        "value"
+    };
     let bytes = tag.as_bytes();
     let mut output = String::with_capacity(tag.len());
     let mut cursor = 1 + name.len();
@@ -1912,7 +1929,7 @@ fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, St
             cursor += 1;
         }
         if bytes.get(cursor) != Some(&b'=') {
-            if attribute == "data-in-out" {
+            if attribute == if read_only { "data-in" } else { "data-in-out" } {
                 has_explicit_binding = true;
             }
             continue;
@@ -1931,7 +1948,7 @@ fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, St
                     .ok_or("unclosed control value expression")?;
                 let expression = tag[cursor + 1..close].trim();
                 cursor = close + 1;
-                (attribute == "value").then_some(expression)
+                (attribute == target).then_some(expression)
             }
             Some(b'"' | b'\'') => {
                 let quote = bytes[cursor];
@@ -1957,7 +1974,7 @@ fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, St
                     .and_then(|content| content.strip_suffix('}'))
                     .map(str::trim);
                 cursor += 1;
-                if attribute == "value" {
+                if attribute == target {
                     expression
                 } else {
                     None
@@ -1973,7 +1990,7 @@ fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, St
                 None
             }
         };
-        if attribute == "data-in-out" {
+        if attribute == if read_only { "data-in" } else { "data-in-out" } {
             has_explicit_binding = true;
         }
         if let Some(expression) = expression {
@@ -1982,11 +1999,16 @@ fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, St
             }
             let binding = template_binding_path(expression).ok_or_else(|| {
                 format!(
-                    "value on <{name}> must reference a writable binding, such as value={{value}}"
+                    "{target} on <{name}> must reference a {} binding, such as {target}={{value}}",
+                    if read_only { "readable" } else { "writable" }
                 )
             })?;
             output.push_str(&tag[copied..attribute_start]);
-            output.push_str(&format!("data-rsc-value-binding=\"{binding}\""));
+            if read_only {
+                output.push_str(&format!("data-in=\"{binding}\""));
+            } else {
+                output.push_str(&format!("data-rsc-value-binding=\"{binding}\""));
+            }
             copied = cursor;
             value_binding = Some(binding);
         }
@@ -1997,7 +2019,7 @@ fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, St
 
     if value_binding.is_some() && has_explicit_binding {
         return Err(format!(
-            "<{name}> value={{...}} already declares its two-way binding; remove data-in-out"
+            "<{name}> {target}={{...}} already declares its binding; remove the explicit binding"
         ));
     }
     if value_binding.is_some() {
@@ -2202,6 +2224,9 @@ fn element_code(
             "<style> tags are not supported; put styles in a Rust styles({...}) bundle".into(),
         );
     }
+    if element.value().name() == "video" {
+        return Err("<video> is not supported by GPUI Kit 0.7; use a native component backed by a video renderer".into());
+    }
     let style_id = *next_style_id;
     *next_style_id += 1;
     if element.value().attr("style").is_some() || element.value().attr("mobile-style").is_some() {
@@ -2290,7 +2315,10 @@ fn element_code(
         "component" => "container.child(view.render_component(element, viewport_width, window, cx)).into_any_element()".to_owned(),
         "rsc-if" => "view.render_if(element, props, container, viewport_width, window, cx)".to_owned(),
             "output" | "rsc-value" => "view.render_output(element, container)".to_owned(),
-            "input" => "{ let control_style = container.style().clone(); view.render_slider(element, container, control_style) }".to_owned(),
+            "input" => "{ let control_style = container.style().clone(); view.render_input(element, container, control_style) }".to_owned(),
+            "textarea" => "view.render_textarea(element, container)".to_owned(),
+            "img" => "{ let image_style = container.style().clone(); view.render_image(element, image_style) }".to_owned(),
+            "progress" => "{ let progress_style = container.style().clone(); view.render_progress(element, container, progress_style) }".to_owned(),
             "select" => "view.render_select(element, container)".to_owned(),
             "button" if element.value().attr("data-out").is_some() => {
                 "{ let control_style = container.style().clone(); view.render_button(element, container, control_style, cx) }".to_owned()

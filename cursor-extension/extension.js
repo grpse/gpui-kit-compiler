@@ -170,6 +170,9 @@ function tagCompletions() {
   items.push(
     completion("button", "GPUI button; run a Rust expression when clicked", 'button on-click={$1}>$0</button>', vscode.CompletionItemKind.Class),
     completion("input", "GPUI range slider bound to a signal or mutable value", 'input id="${1:value}" type="range" min="0" max="100" step="1" value={${2:value}} />', vscode.CompletionItemKind.Class),
+    completion("img", "GPUI image from a file path or URL", 'img src="${1:path/to/image.png}" alt="${2:Description}" />', vscode.CompletionItemKind.Class),
+    completion("textarea", "GPUI multiline text input", 'textarea id="${1:notes}" value={${2:notes}}></textarea>', vscode.CompletionItemKind.Class),
+    completion("progress", "GPUI progress indicator", 'progress value={${1:progress}} max="${2:1}"></progress>', vscode.CompletionItemKind.Class),
     completion("select", "GPUI selection control with Rust-mapped options", 'select id="${1:method}" value={${2:method}}>{${3:methods}.iter().map(|&${4:method}| => <option value={${4:method}}>{${4:method}}</option>)}</select>', vscode.CompletionItemKind.Class),
     completion("option", "Option for a GPUI select", 'option value="$1">$0</option>', vscode.CompletionItemKind.Class),
     completion("output", "Formatted or bar output; plain values can use {name} in a div", 'output data-in="$1"></output>', vscode.CompletionItemKind.Class),
@@ -184,7 +187,10 @@ function attributeCompletions(tag, used) {
     ["id", "Element id; also identifies select options"],
   ];
   if (tag === "button") attrs.push(["on-click", "Run a Rust expression when the button is clicked", "on-click={$1}"], ["data-out", "Legacy binding to a Rust action"], ["data-args", "Comma-separated Rust action arguments"]);
-  if (tag === "input") attrs.push(["type", "Supported control type", 'type="range"'], ["min", "Range lower bound"], ["max", "Range upper bound"], ["step", "Range increment"], ["value", "Two-way binding to a signal or mutable Rust value", 'value={$1}']);
+  if (tag === "input") attrs.push(["type", "Supported control type", 'type="range"'], ["min", "Range lower bound"], ["max", "Range upper bound"], ["step", "Range increment"], ["value", "Two-way binding to a signal or mutable Rust value", 'value={$1}'], ["checked", "Two-way checkbox binding", 'checked={$1}'], ["placeholder", "Input placeholder"]);
+  if (tag === "textarea") attrs.push(["value", "Two-way text binding", 'value={$1}'], ["placeholder", "Input placeholder"]);
+  if (tag === "img") attrs.push(["src", "File path, URL, or readable binding", 'src="$1"'], ["alt", "Description for fallback"], ["width", "Width in pixels"], ["height", "Height in pixels"], ["object-fit", "Image fitting mode", 'object-fit="contain"']);
+  if (tag === "progress") attrs.push(["value", "Current value or readable binding", 'value={$1}'], ["max", "Maximum value", 'max="1"']);
   if (tag === "select") attrs.push(["value", "Two-way binding to a signal or mutable Rust value", 'value={$1}']);
   if (tag === "output") attrs.push(["data-in", "Read-only Rust binding"], ["data-render", "Output presentation", 'data-render="bar"'], ["data-format", "Custom output formatter key"]);
   if (tag === "option") attrs.push(["value", "Value written by the select"], ["selected", "Use this option as the initial value"]);
@@ -210,7 +216,7 @@ function provideCompletions(document, position) {
     const used = new Set([...openingTag[2].matchAll(/([A-Za-z_:][\w:.-]*)\s*=/g)].map((item) => item[1]));
     const value = openingTag[2].match(/([A-Za-z_:][\w:.-]*)\s*=\s*(["'][^"']*)$/);
     if (value && value[1] === "type" && tag === "input") {
-      return [completion("range", "Only supported GPUI input type", "range", vscode.CompletionItemKind.Value)];
+      return ["range", "text", "email", "password", "search", "url", "tel", "date", "checkbox"].map((type) => completion(type, "Supported GPUI input type", type, vscode.CompletionItemKind.Value));
     }
     return attributeCompletions(tag, used);
   }
