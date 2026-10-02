@@ -7,12 +7,15 @@ edition = "2024"
 scraper = { version = "0.24", optional = true }
 syn = { version = "2", features = ["full", "visit-mut"], optional = true }
 quote = { version = "1", optional = true }
-toml = { version = "0.8", optional = true }
+serde_json = { version = "1", optional = true }
+gpui = { package = "gpui-pre", version = "=0.3.7", optional = true }
+gpui-kit = { version = "0.7", optional = true }
 
 [features]
 default = ["compiler"]
-compiler = ["dep:scraper", "dep:syn", "dep:quote", "dep:toml"]
-debug-fps = []
+compiler = ["dep:scraper", "dep:syn", "dep:quote", "dep:serde_json"]
+runtime = ["dep:gpui", "dep:gpui-kit"]
+debug-fps = ["runtime"]
 
 [[bin]]
 name = "gpui-rsc"

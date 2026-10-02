@@ -1,6 +1,6 @@
 use crate::{
     TemplateElement,
-    runtime::{Binding, Snapshot, Value},
+    runtime::{Binding, Signal, Snapshot, Value},
 };
 use std::collections::HashMap;
 
@@ -57,6 +57,11 @@ pub struct Definition {
     pub title: &'static str,
     pub imports: Vec<Definition>,
     pub bindings: Vec<Binding>,
+    /// Signals declared in this component and therefore owned by its view context.
+    pub signals: Vec<(&'static str, Signal)>,
+    /// Signals declared in a compiled component body.
+    pub local_signals: Vec<(&'static str, Signal)>,
+    pub initial_values: HashMap<String, Value>,
     pub template: TemplateElement,
     pub calculate: Option<fn(&HashMap<String, Value>, u64) -> Snapshot>,
     pub on_change: Option<fn(&mut HashMap<String, Value>, &str, &Value)>,
@@ -81,6 +86,9 @@ impl Definition {
             title,
             imports: Vec::new(),
             bindings,
+            signals: Vec::new(),
+            local_signals: Vec::new(),
+            initial_values: HashMap::new(),
             template,
             calculate: None,
             on_change: None,
@@ -106,6 +114,41 @@ impl Definition {
         self
     }
 
+    /// Set initial model values, including values shown by controlled inputs.
+    pub fn with_initial_values(mut self, values: HashMap<String, Value>) -> Self {
+        self.initial_values = values;
+        self
+    }
+
+    /// Register locally declared signals with this component definition.
+    pub fn with_signals(
+        mut self,
+        signals: impl IntoIterator<Item = (&'static str, Signal)>,
+    ) -> Self {
+        self.signals.extend(signals);
+        self
+    }
+
+    /// Register signals declared inside a compiled component body.
+    pub fn with_local_signals(
+        mut self,
+        signals: impl IntoIterator<Item = (&'static str, Signal)>,
+    ) -> Self {
+        self.local_signals.extend(signals);
+        self
+    }
+
+    /// Attach a Rust action to a button in this component.
+    pub fn with_action(
+        mut self,
+        name: &'static str,
+        action: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        self.bindings
+            .push(Binding::write_with(name, move |_, _| action()));
+        self
+    }
+
     /// Subscribe this component to immutable input values used by its own view.
     pub fn with_view_inputs(mut self, inputs: &'static [&'static str]) -> Self {
         self.view_inputs = inputs;
@@ -124,6 +167,17 @@ impl Definition {
 
     pub fn with_output_formatter(mut self, formatter: OutputFormatter) -> Self {
         self.output_formatter = Some(formatter);
+        self
+    }
+
+    /// Set the root calculation and optional model-change callback.
+    pub fn with_calculation(
+        mut self,
+        calculate: fn(&HashMap<String, Value>, u64) -> Snapshot,
+        on_change: Option<fn(&mut HashMap<String, Value>, &str, &Value)>,
+    ) -> Self {
+        self.calculate = Some(calculate);
+        self.on_change = on_change;
         self
     }
 
@@ -153,6 +207,9 @@ macro_rules! component {
             title: title(),
             imports: Vec::new(),
             bindings: vec![$($binding),*],
+            signals: Vec::new(),
+            local_signals: Vec::new(),
+            initial_values: std::collections::HashMap::new(),
             template: template(),
             calculate: Some($calculate),
             on_change: Some($on_change),
@@ -169,6 +226,9 @@ macro_rules! component {
             title: title(),
             imports: Vec::new(),
             bindings: vec![$($binding),*],
+            signals: Vec::new(),
+            local_signals: Vec::new(),
+            initial_values: std::collections::HashMap::new(),
             template: template(),
             calculate: Some($calculate),
             on_change: None,
@@ -185,6 +245,9 @@ macro_rules! component {
             title: title(),
             imports: Vec::new(),
             bindings: vec![$($binding),*],
+            signals: Vec::new(),
+            local_signals: Vec::new(),
+            initial_values: std::collections::HashMap::new(),
             template: template(),
             calculate: None,
             on_change: None,
@@ -201,6 +264,9 @@ macro_rules! component {
             title: title(),
             imports: vec![$($import),*],
             bindings: vec![$($binding),*],
+            signals: Vec::new(),
+            local_signals: Vec::new(),
+            initial_values: std::collections::HashMap::new(),
             template: template(),
             calculate: Some($calculate),
             on_change: Some($on_change),
@@ -217,6 +283,9 @@ macro_rules! component {
             title: title(),
             imports: vec![$($import),*],
             bindings: vec![$($binding),*],
+            signals: Vec::new(),
+            local_signals: Vec::new(),
+            initial_values: std::collections::HashMap::new(),
             template: template(),
             calculate: Some($calculate),
             on_change: None,
@@ -233,6 +302,9 @@ macro_rules! component {
             title: title(),
             imports: vec![$($import),*],
             bindings: vec![$($binding),*],
+            signals: Vec::new(),
+            local_signals: Vec::new(),
+            initial_values: std::collections::HashMap::new(),
             template: template(),
             calculate: None,
             on_change: None,

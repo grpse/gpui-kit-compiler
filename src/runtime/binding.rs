@@ -54,7 +54,7 @@ pub enum Control {
         min: f32,
         max: f32,
         step: f32,
-        default: f32,
+        default: Option<f32>,
     },
     Select {
         id: String,
@@ -74,10 +74,14 @@ impl Control {
             Self::Range { binding, .. } | Self::Select { binding, .. } => binding,
         }
     }
-    pub fn default_value(&self) -> Value {
+    pub fn default_value(&self) -> Option<Value> {
         match self {
-            Self::Range { default, .. } => Value::Number(*default),
-            Self::Select { default, .. } => Value::Text(default.clone()),
+            Self::Range {
+                default: Some(default),
+                ..
+            } => Some(Value::Number(*default)),
+            Self::Range { default: None, .. } => None,
+            Self::Select { default, .. } => Some(Value::Text(default.clone())),
         }
     }
 }
@@ -86,6 +90,7 @@ pub struct Page {
     pub root: Element,
     pub controls: Vec<Control>,
     pub defaults: HashMap<String, Value>,
+    pub signals: Vec<(String, crate::runtime::Signal)>,
     pub mobile_breakpoint: Option<f32>,
     pub output_formatter: Option<OutputFormatter>,
     pub inputs: Vec<Binding>,
@@ -93,6 +98,12 @@ pub struct Page {
 }
 
 impl Page {
+    pub fn bind_signals(&self, engine: &crate::runtime::Engine) {
+        for (key, signal) in &self.signals {
+            signal.bind_engine(key.clone(), engine.clone());
+        }
+    }
+
     pub fn props(&self, snapshot: &Snapshot) -> ComponentProps {
         ComponentProps::from_values(
             self.inputs
@@ -116,20 +127,50 @@ fn compile_component(
     scope: &HashMap<String, Binding>,
     path: &str,
 ) -> Result<Page, String> {
+    let mut scope_with_signals = scope.clone();
+    let mut component_signals = Vec::new();
+    for (name, signal) in &def.signals {
+        if scope_with_signals.contains_key(*name) {
+            return Err(format!("signal {name} conflicts with a component binding"));
+        }
+        let key = component_signal_key(path, def.name, name);
+        scope_with_signals.insert(
+            (*name).to_owned(),
+            Binding::signal_at(*name, key.clone(), signal.clone()),
+        );
+        component_signals.push((key, signal.clone()));
+    }
+    for (name, prototype) in &def.local_signals {
+        if scope_with_signals.contains_key(*name) {
+            return Err(format!("signal {name} conflicts with a component binding"));
+        }
+        let signal = prototype.clone();
+        let key = component_signal_key(path, def.name, name);
+        scope_with_signals.insert(
+            (*name).to_owned(),
+            Binding::signal_at(*name, key.clone(), signal.clone()),
+        );
+        component_signals.push((key, signal));
+    }
+    let scope = &scope_with_signals;
     let mut controls = Vec::new();
     let mut seen = HashSet::new();
     let root = compile_element(&def.template, def, scope, path, &mut controls, &mut seen)?;
-    let defaults = controls
+    let mut defaults = controls
         .iter()
         .filter_map(|control| {
             control
                 .binding()
                 .data_key
-                .map(|key| (key.to_owned(), control.default_value()))
+                .zip(control.default_value())
+                .map(|(key, value)| (key.to_owned(), value))
         })
         .collect::<HashMap<_, _>>();
-    let mut defaults = defaults;
     collect_nested_defaults(&root, &mut defaults);
+    defaults.extend(def.initial_values.clone());
+    for (key, signal) in &component_signals {
+        defaults.insert(key.clone(), signal.get());
+    }
     let readable = scope
         .iter()
         .filter(|(_, binding)| binding.direction.reads())
@@ -138,6 +179,12 @@ fn compile_component(
     let mut used_inputs = HashSet::new();
     collect_template_inputs(&root, &readable, &mut used_inputs);
     used_inputs.extend(def.view_inputs.iter().map(|name| (*name).to_owned()));
+    used_inputs.extend(
+        def.signals
+            .iter()
+            .chain(def.local_signals.iter())
+            .map(|(name, _)| (*name).to_owned()),
+    );
     let mut inputs = readable
         .iter()
         .filter(|(name, _)| used_inputs.contains(**name))
@@ -148,6 +195,7 @@ fn compile_component(
         root,
         controls,
         defaults,
+        signals: component_signals,
         mobile_breakpoint: def.mobile_breakpoint,
         output_formatter: def.output_formatter,
         inputs,
@@ -155,12 +203,20 @@ fn compile_component(
     })
 }
 
+fn component_signal_key(path: &str, component_name: &str, signal_name: &str) -> String {
+    if path == component_name {
+        signal_name.to_owned()
+    } else {
+        format!("{path}/{signal_name}")
+    }
+}
+
 fn collect_template_inputs(
     element: &Element,
     readable: &HashMap<&str, Binding>,
     inputs: &mut HashSet<String>,
 ) {
-    for name in ["data-in", "data-in-out"] {
+    for name in ["data-in", "data-in-out", "data-rsc-value-binding"] {
         if let Some(binding) = element.attr(name)
             && readable.contains_key(binding)
         {
@@ -204,7 +260,11 @@ fn resolve_expr(
     let inner = text
         .strip_prefix('[')
         .and_then(|x| x.strip_suffix(']'))
-        .ok_or_else(|| format!("parameter {target} needs a [value expression]"))?
+        .ok_or_else(|| {
+            format!(
+                "component property {target} needs a braced Rust expression, such as `{target}={{{target}}}`"
+            )
+        })?
         .trim();
     if let Some(binding) = scope.get(inner) {
         return binding.alias(target, direction);
@@ -429,10 +489,19 @@ fn compile_element(
     if bindings.len() > 1 {
         return Err(format!("<{tag}> has multiple binding directions"));
     }
+    if attr("data-rsc-value-binding").is_some() && !bindings.is_empty() {
+        return Err(format!(
+            "<{tag}> value={{...}} already declares its two-way binding; remove data-in-out"
+        ));
+    }
+    let declared_binding = bindings
+        .first()
+        .copied()
+        .or_else(|| attr("data-rsc-value-binding").map(|name| ("value", name)));
     let mut binding = None;
     let mut control_id = None;
     let mut args = Vec::new();
-    if let Some((kind, name)) = bindings.first().copied() {
+    if let Some((kind, name)) = declared_binding {
         if kind == "data-in" && !matches!(tag.as_str(), "output" | "rsc-value" | "rsc-if") {
             return Err(format!("data-in on <{tag}> requires an output element"));
         }
@@ -446,7 +515,8 @@ fn compile_element(
         };
         let source = source.alias(source.name, direction)?;
         if direction == Direction::InOut || (direction == Direction::Out && tag != "button") {
-            let id = format!("{path}/{name}");
+            let control_name = attr("id").unwrap_or(name);
+            let id = format!("{path}/{control_name}");
             if !seen.insert(id.clone()) {
                 return Err(format!("duplicate control {id}"));
             }
@@ -458,13 +528,16 @@ fn compile_element(
                             .parse()
                             .map_err(|_| format!("{id} has invalid {key}"))
                     };
-                    let (min, max, step, default) = (
-                        parse("min")?,
-                        parse("max")?,
-                        parse("step")?,
-                        parse("value")?,
-                    );
-                    if !(min < max && step > 0.0 && (min..=max).contains(&default)) {
+                    let (min, max, step) = (parse("min")?, parse("max")?, parse("step")?);
+                    let default = match attr("value") {
+                        Some(_) => Some(parse("value")?),
+                        None if kind == "value" => None,
+                        None => return Err(format!("{id} needs value={{binding}}")),
+                    };
+                    if !(min < max
+                        && step > 0.0
+                        && default.is_none_or(|default| (min..=max).contains(&default)))
+                    {
                         return Err(format!("{id} has invalid range/default"));
                     }
                     controls.push(Control::Range {
@@ -540,10 +613,10 @@ fn compile_element(
         binding = Some(source);
     }
     if tag == "input" && control_id.is_none() {
-        return Err("<input> needs type=\"range\" and data-in-out".into());
+        return Err("<input> needs type=\"range\" and value={binding} or data-in-out".into());
     }
     if tag == "select" && control_id.is_none() {
-        return Err("<select> needs data-in-out".into());
+        return Err("<select> needs value={binding} or data-in-out".into());
     }
     if tag == "button"
         && binding

@@ -8,15 +8,15 @@ let myStyles = styles({
     methodPreview: { display: "flex", flex: 1, width: gpui::Length::Percent(1.0), height: gpui::Length::Percent(1.0), minWidth: 0.0 }
 });
 {if method == "V60" {
-  <div class={myStyles.previewGallery}><V60Preview class={myStyles.methodPreview} water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+  <div class={myStyles.previewGallery}><V60Preview class={myStyles.methodPreview} water={water} intensity={intensity} bitterness={bitterness} body={body} /></div>
 } else {
   {if method == "French press" {
-    <div class={myStyles.previewGallery}><FrenchPressPreview class={myStyles.methodPreview} water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+    <div class={myStyles.previewGallery}><FrenchPressPreview class={myStyles.methodPreview} water={water} intensity={intensity} bitterness={bitterness} body={body} /></div>
   } else {
     {if method == "AeroPress" {
-      <div class={myStyles.previewGallery}><AeropressPreview class={myStyles.methodPreview} water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+      <div class={myStyles.previewGallery}><AeropressPreview class={myStyles.methodPreview} water={water} intensity={intensity} bitterness={bitterness} body={body} /></div>
     } else {
-      <div class={myStyles.previewGallery}><EspressoPreview class={myStyles.methodPreview} water="[water]" intensity="[intensity]" bitterness="[bitterness]" body="[body]" /></div>
+      <div class={myStyles.previewGallery}><EspressoPreview class={myStyles.methodPreview} water={water} intensity={intensity} bitterness={bitterness} body={body} /></div>
     }}
   }}
 }}

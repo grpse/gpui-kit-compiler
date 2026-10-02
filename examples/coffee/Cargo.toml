@@ -1,0 +1,13 @@
+[package]
+name = "coffee-lab"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+debug-fps = ["gpui-rsc/debug-fps"]
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui-kit = "0.7"
+gpui-rsc = { path = "../..", default-features = false, features = ["runtime"] }

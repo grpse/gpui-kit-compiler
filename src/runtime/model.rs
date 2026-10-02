@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         mpsc::{self, Receiver, Sender},
     },
     thread,
@@ -34,6 +34,153 @@ impl Value {
     }
 }
 
+impl From<f32> for Value {
+    fn from(value: f32) -> Self {
+        Self::Number(value)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Self::Number(value as f32)
+    }
+}
+
+macro_rules! number_value_from {
+    ($($number:ty),* $(,)?) => {
+        $(impl From<$number> for Value {
+            fn from(value: $number) -> Self {
+                Self::Number(value as f32)
+            }
+        })*
+    };
+}
+
+number_value_from!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+struct SignalState {
+    value: Mutex<Value>,
+    subscribers: Mutex<Vec<Sender<()>>>,
+    engines: Mutex<HashMap<(usize, String), Engine>>,
+}
+
+/// Shared component state that notifies every view using it when its value changes.
+#[derive(Clone)]
+pub struct Signal {
+    state: Arc<SignalState>,
+}
+
+impl std::fmt::Debug for Signal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("Signal").field(&self.get()).finish()
+    }
+}
+
+impl Signal {
+    pub fn new(value: impl Into<Value>) -> Self {
+        Self {
+            state: Arc::new(SignalState {
+                value: Mutex::new(value.into()),
+                subscribers: Mutex::new(Vec::new()),
+                engines: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    pub fn get(&self) -> Value {
+        self.state
+            .value
+            .lock()
+            .expect("signal lock poisoned")
+            .clone()
+    }
+
+    pub fn set(&self, value: impl Into<Value>) {
+        let value = value.into();
+        if self.replace_value(value.clone()) {
+            self.notify_subscribers();
+            let engines = self
+                .state
+                .engines
+                .lock()
+                .expect("signal engine bindings lock poisoned");
+            for ((_, key), engine) in engines.iter() {
+                engine.set(key.clone(), value.clone());
+            }
+        }
+    }
+
+    fn replace_value(&self, value: Value) -> bool {
+        let mut current = self.state.value.lock().expect("signal lock poisoned");
+        if *current == value {
+            false
+        } else {
+            *current = value;
+            true
+        }
+    }
+
+    fn notify_subscribers(&self) {
+        self.state
+            .subscribers
+            .lock()
+            .expect("signal subscribers lock poisoned")
+            .retain(|subscriber| subscriber.send(()).is_ok());
+    }
+
+    fn sync_from_engine(signal: &Weak<SignalState>, value: Value) {
+        if let Some(state) = signal.upgrade() {
+            let signal = Self { state };
+            if signal.replace_value(value) {
+                signal.notify_subscribers();
+            }
+        }
+    }
+
+    pub(crate) fn bind_engine(&self, key: String, engine: Engine) {
+        let identity = Arc::as_ptr(&engine.shared) as usize;
+        engine.bind_signal(key.clone(), self);
+        self.state
+            .engines
+            .lock()
+            .expect("signal engine bindings lock poisoned")
+            .insert((identity, key), engine);
+    }
+
+    pub(crate) fn subscribe(&self) -> Arc<Mutex<Receiver<()>>> {
+        let (sender, receiver) = mpsc::channel();
+        self.state
+            .subscribers
+            .lock()
+            .expect("signal subscribers lock poisoned")
+            .push(sender);
+        Arc::new(Mutex::new(receiver))
+    }
+}
+
+/// Create a reactive value for use in a component template.
+pub fn signal(value: impl Into<Value>) -> Signal {
+    Signal::new(value)
+}
+
 /// Binding direction is relative to the UI component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -61,6 +208,7 @@ pub struct Binding {
     pub data_key: Option<&'static str>,
     getter: Option<Getter>,
     setter: Option<Setter>,
+    signal: Option<Signal>,
 }
 
 impl Binding {
@@ -71,6 +219,7 @@ impl Binding {
             data_key: None,
             getter: None,
             setter: None,
+            signal: None,
         }
     }
     pub fn read_key(name: &'static str, key: &'static str) -> Self {
@@ -86,6 +235,7 @@ impl Binding {
             data_key: None,
             getter: Some(Arc::new(getter)),
             setter: None,
+            signal: None,
         }
     }
     pub fn write_with(
@@ -98,6 +248,7 @@ impl Binding {
             data_key: None,
             getter: None,
             setter: Some(Arc::new(setter)),
+            signal: None,
         }
     }
     pub fn two_way_key(name: &'static str, key: &'static str) -> Self {
@@ -120,6 +271,32 @@ impl Binding {
             data_key,
             getter: Some(Arc::new(getter)),
             setter: Some(Arc::new(setter)),
+            signal: None,
+        }
+    }
+    pub fn signal(name: &'static str, signal: Signal) -> Self {
+        let getter_signal = signal.clone();
+        let setter_signal = signal.clone();
+        Self {
+            name,
+            direction: Direction::InOut,
+            data_key: None,
+            getter: Some(Arc::new(move |_| Some(getter_signal.get()))),
+            setter: Some(Arc::new(move |_, value| setter_signal.set(value))),
+            signal: Some(signal),
+        }
+    }
+    pub(crate) fn signal_at(name: &'static str, key: String, signal: Signal) -> Self {
+        let setter_signal = signal;
+        Self {
+            name,
+            direction: Direction::InOut,
+            data_key: None,
+            getter: Some(Arc::new(move |snapshot| snapshot.get(&key).cloned())),
+            setter: Some(Arc::new(move |_, value| setter_signal.set(value))),
+            // The engine publishes these values with a completed snapshot. Subscribing to
+            // the signal itself would render a new control value with old calculations.
+            signal: None,
         }
     }
     pub fn constant(name: &'static str, value: Value) -> Self {
@@ -146,6 +323,7 @@ impl Binding {
             } else {
                 None
             },
+            signal: self.signal.clone(),
         })
     }
     pub fn get(&self, snapshot: &Snapshot) -> Option<Value> {
@@ -155,6 +333,9 @@ impl Binding {
         if let Some(setter) = &self.setter {
             setter(engine, value);
         }
+    }
+    pub(crate) fn subscribe_signal(&self) -> Option<Arc<Mutex<Receiver<()>>>> {
+        self.signal.as_ref().map(Signal::subscribe)
     }
 }
 
@@ -226,6 +407,7 @@ pub struct Engine {
     sender: Sender<Message>,
     shared: Arc<Mutex<Snapshot>>,
     subscribers: Arc<Mutex<Vec<Sender<Snapshot>>>>,
+    signals: Arc<Mutex<HashMap<String, Weak<SignalState>>>>,
 }
 
 impl Engine {
@@ -237,8 +419,10 @@ impl Engine {
         let shared = Arc::new(Mutex::new(calculate(&defaults, 0)));
         let (sender, receiver) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<Snapshot>>::new()));
+        let signals = Arc::new(Mutex::new(HashMap::<String, Weak<SignalState>>::new()));
         let shared_worker = Arc::clone(&shared);
         let subscribers_worker = Arc::clone(&subscribers);
+        let signals_worker = Arc::clone(&signals);
         thread::Builder::new()
             .name("rsc-calculation-worker".into())
             .spawn(move || {
@@ -262,6 +446,20 @@ impl Engine {
                             reset_epoch += 1;
                         }
                     }
+                    let signal_updates = signals_worker
+                        .lock()
+                        .expect("engine signal registry lock poisoned")
+                        .iter()
+                        .filter_map(|(key, signal)| {
+                            values
+                                .get(key)
+                                .cloned()
+                                .map(|value| (signal.clone(), value))
+                        })
+                        .collect::<Vec<_>>();
+                    for (signal, value) in signal_updates {
+                        Signal::sync_from_engine(&signal, value);
+                    }
                     let next = calculate(&values, reset_epoch);
                     *shared_worker.lock().expect("snapshot lock poisoned") = next.clone();
                     subscribers_worker
@@ -275,7 +473,14 @@ impl Engine {
             sender,
             shared,
             subscribers,
+            signals,
         }
+    }
+    fn bind_signal(&self, key: String, signal: &Signal) {
+        self.signals
+            .lock()
+            .expect("engine signal registry lock poisoned")
+            .insert(key, Arc::downgrade(&signal.state));
     }
     pub fn set(&self, key: impl Into<String>, value: Value) {
         let _ = self.sender.send(Message::Set(key.into(), value));
@@ -296,5 +501,24 @@ impl Engine {
     }
     pub fn snapshot(&self) -> Snapshot {
         self.shared.lock().expect("snapshot lock poisoned").clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_signal_binding_reads_the_matching_snapshot() {
+        let signal = Signal::new(20.0);
+        let binding = Binding::signal_at("dose", "dose".into(), signal.clone());
+        let snapshot = Snapshot {
+            values: HashMap::from([("dose".into(), Value::Number(20.0))]),
+            reset_epoch: 0,
+        };
+
+        signal.set(30.0);
+        assert_eq!(binding.get(&snapshot), Some(Value::Number(20.0)));
+        assert_eq!(signal.get(), Value::Number(30.0));
     }
 }

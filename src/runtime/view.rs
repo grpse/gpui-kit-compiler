@@ -155,7 +155,13 @@ impl HtmlView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        page.bind_signals(&engine);
         let updates = (!page.inputs.is_empty()).then(|| engine.subscribe());
+        let signal_updates = page
+            .inputs
+            .iter()
+            .filter_map(|binding| binding.subscribe_signal())
+            .collect::<Vec<_>>();
         let snapshot = engine.snapshot();
         let props = page.props(&snapshot);
         #[cfg(feature = "debug-fps")]
@@ -218,18 +224,48 @@ impl HtmlView {
             })
             .detach();
         }
+        for updates in signal_updates {
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    let receiver = updates.clone();
+                    let changed = cx
+                        .background_spawn(async move {
+                            receiver
+                                .lock()
+                                .expect("signal update receiver lock poisoned")
+                                .recv()
+                        })
+                        .await;
+                    if changed.is_err() {
+                        break;
+                    }
+                    if this
+                        .update_in(cx, |view, window, cx| {
+                            let next = view.engine.snapshot();
+                            view.apply_snapshot(next, window, cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         view
     }
 
     fn apply_snapshot(&mut self, next: Snapshot, window: &mut Window, cx: &mut Context<Self>) {
         let next_props = self.page.props(&next);
-        if next_props == self.props {
-            return;
+        let props_changed = next_props != self.props;
+        if props_changed {
+            self.sync_controls(&next, false, window, cx);
+            self.props = next_props;
         }
-        self.sync_controls(&next, false, window, cx);
         self.snapshot = next;
-        self.props = next_props;
-        cx.notify();
+        if props_changed {
+            cx.notify();
+        }
     }
 
     fn build_controls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -251,7 +287,7 @@ impl HtmlView {
                             .min(min)
                             .max(max)
                             .step(step)
-                            .default_value(default)
+                            .default_value(default.unwrap_or(min))
                     });
                     self.subscriptions.push(cx.subscribe(
                         &state,
@@ -313,7 +349,7 @@ impl HtmlView {
             let Some(value) = control.binding().get(snapshot) else {
                 continue;
             };
-            if !initial && control.binding().get(&self.snapshot).as_ref() == Some(&value) {
+            if !initial && self.props.get(control.binding().name) == Some(&value) {
                 continue;
             }
             let id = control.id();
@@ -601,9 +637,7 @@ pub fn run(definition: Definition) {
 }
 
 pub fn run_with_config(definition: Definition, startup: StartupConfig) {
-    let calculate = definition
-        .calculate
-        .expect("root component needs calculate callback");
+    let calculate = definition.calculate.unwrap_or(identity_snapshot);
     let on_change = definition.on_change;
     let title = definition.title.to_owned();
     let page = binding::compile(&definition).unwrap_or_else(|error| {
@@ -652,4 +686,11 @@ pub fn run_with_config(definition: Definition, startup: StartupConfig) {
         )
         .expect("failed to open GPUI window");
     });
+}
+
+fn identity_snapshot(values: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot {
+    Snapshot {
+        values: values.clone(),
+        reset_epoch,
+    }
 }

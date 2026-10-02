@@ -43,12 +43,13 @@ pub fn EspressoPreview(water: f32, intensity: f32, bitterness: f32, body: f32) -
             height: gpui::Length::Percent(liquid_level(water))
         }
     });
-<div class={myStyles.card}>
-    <div><div class={myStyles.previewTitle}>Espresso · Pressure</div><div class={myStyles.previewCopy}>Hot water is forced through a compact puck of finely ground coffee.</div></div>
-    <div class={myStyles.stage}>
-      <div class={myStyles.machine}></div>
-      <div class={myStyles.portafilter}></div>
-      <div class={myStyles.espressoCup}><div class={myStyles.liquid}></div></div>
+
+    <div class={myStyles.card}>
+        <div><div class={myStyles.previewTitle}>Espresso · Pressure</div><div class={myStyles.previewCopy}>Hot water is forced through a compact puck of finely ground coffee.</div></div>
+        <div class={myStyles.stage}>
+        <div class={myStyles.machine}></div>
+        <div class={myStyles.portafilter}></div>
+        <div class={myStyles.espressoCup}><div class={myStyles.liquid}></div></div>
+        </div>
     </div>
-  </div>
 }

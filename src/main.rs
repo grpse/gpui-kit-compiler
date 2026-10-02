@@ -7,368 +7,275 @@ use std::{
     time::Duration,
 };
 
+struct RustProject {
+    root: PathBuf,
+    manifest: PathBuf,
+    target_directory: PathBuf,
+    binary: String,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("rsc: {error}");
         std::process::exit(1);
     }
 }
+
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "run".into());
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source = args
-        .next()
-        .ok_or("usage: gpui-rsc [compile|build|run|dev] <component-dir>")?;
-    let source = fs::canonicalize(source).map_err(|error| error.to_string())?;
-    if !source.join("app.rsx").exists() {
-        return Err(format!("{} needs app.rsx", source.display()));
-    }
-    let name = source
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or("invalid source directory")?
-        .replace('_', "-");
-    let generated = root.join("target/rsc-build").join(&name);
-    let package = format!("{name}-rsc-app");
+    let source = args.next().ok_or(
+        "usage: gpui-rsc [compile|build|run|dev] <cargo-project-dir> [cargo build options...]",
+    )?;
+    let root = fs::canonicalize(source).map_err(|error| error.to_string())?;
+    let project = load_project(&root)?;
+    let cargo_args = args.collect::<Vec<_>>();
+
     match mode.as_str() {
-        "compile" => compile(&root, &source, &generated, &package),
-        "build" => build(&root, &source, &generated, &package),
+        "compile" => {
+            if !cargo_args.is_empty() {
+                return Err("cargo build options are only accepted by build, run, and dev".into());
+            }
+            compile_project(&project)
+        }
+        "build" => {
+            build(&project, &cargo_args)?;
+            Ok(())
+        }
         "run" => {
-            build(&root, &source, &generated, &package)?;
-            let mut child = launch(&root, &package)?;
-            child.wait().map_err(|e| e.to_string())?;
+            let binary = build(&project, &cargo_args)?;
+            let mut child = launch(&root, &binary)?;
+            child.wait().map_err(|error| error.to_string())?;
             Ok(())
         }
         "dev" => {
-            build(&root, &source, &generated, &package)?;
-            let mut child = launch(&root, &package)?;
-            let mut previous = source_hash(&root, &source);
-            println!("Watching .rsx and compiler sources. Press Ctrl+C to stop.");
+            let binary = build(&project, &cargo_args)?;
+            let mut child = launch(&root, &binary)?;
+            let mut previous = source_hash(&root, &project.root);
+            println!("Watching .rsx, Rust, and Cargo sources. Press Ctrl+C to stop.");
             loop {
                 thread::sleep(Duration::from_millis(500));
-                let current = source_hash(&root, &source);
+                let current = source_hash(&root, &project.root);
                 if current != previous {
-                    match build(&root, &source, &generated, &package) {
-                        Ok(()) => {
+                    match build(&project, &cargo_args) {
+                        Ok(binary) => {
                             let _ = child.kill();
                             let _ = child.wait();
-                            child = launch(&root, &package)?;
+                            child = launch(&root, &binary)?;
                         }
                         Err(error) => {
                             eprintln!("Rebuild failed; previous app remains open: {error}")
                         }
                     }
-                    previous = source_hash(&root, &source);
+                    previous = source_hash(&root, &project.root);
                 }
             }
         }
-        _ => Err("usage: gpui-rsc [compile|build|run|dev] <component-dir>".into()),
-    }
-}
-fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
-    if fs::read_to_string(path).ok().as_deref() != Some(content) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::write(path, content).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-struct AppStartupConfig {
-    width: f32,
-    height: f32,
-    min_width: Option<f32>,
-    min_height: Option<f32>,
-    state: &'static str,
-    decorations: &'static str,
-    resizable: bool,
-    minimizable: bool,
-    movable: bool,
-    focus: bool,
-    show: bool,
-}
-
-impl Default for AppStartupConfig {
-    fn default() -> Self {
-        Self {
-            width: 1240.0,
-            height: 870.0,
-            min_width: None,
-            min_height: None,
-            state: "Windowed",
-            decorations: "Client",
-            resizable: true,
-            minimizable: true,
-            movable: true,
-            focus: true,
-            show: true,
-        }
+        _ => Err(
+            "usage: gpui-rsc [compile|build|run|dev] <cargo-project-dir> [cargo build options...]"
+                .into(),
+        ),
     }
 }
 
-impl AppStartupConfig {
-    fn rust_expression(self) -> String {
-        let option = |value: Option<f32>| match value {
-            Some(value) => format!("Some({value:?})"),
-            None => "None".into(),
-        };
-        format!(
-            "runtime::StartupConfig {{ width: {:?}, height: {:?}, min_width: {}, min_height: {}, state: runtime::StartupWindowState::{}, decorations: runtime::StartupDecorations::{}, resizable: {}, minimizable: {}, movable: {}, focus: {}, show: {} }}",
-            self.width,
-            self.height,
-            option(self.min_width),
-            option(self.min_height),
-            self.state,
-            self.decorations,
-            self.resizable,
-            self.minimizable,
-            self.movable,
-            self.focus,
-            self.show,
-        )
+fn load_project(root: &Path) -> Result<RustProject, String> {
+    let manifest = root.join("Cargo.toml");
+    if !manifest.is_file() {
+        return Err(format!("{} needs Cargo.toml", root.display()));
     }
-}
-
-fn read_startup_config(source: &Path) -> Result<AppStartupConfig, String> {
-    let path = source.join("gpui-rsc.toml");
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(AppStartupConfig::default());
-        }
-        Err(error) => return Err(format!("{}: {error}", path.display())),
-    };
-    let document = contents
-        .parse::<toml::Value>()
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    let table = document
-        .as_table()
-        .ok_or_else(|| format!("{} must contain a TOML table", path.display()))?;
-    for key in table.keys() {
-        if key != "window" {
-            return Err(format!(
-                "{}: unsupported top-level key `{key}` (expected [window])",
-                path.display()
-            ));
-        }
-    }
-    let Some(window) = table.get("window") else {
-        return Ok(AppStartupConfig::default());
-    };
-    let window = window
-        .as_table()
-        .ok_or_else(|| format!("{}: [window] must be a table", path.display()))?;
-    const SUPPORTED: &[&str] = &[
-        "width",
-        "height",
-        "min_width",
-        "min_height",
-        "state",
-        "decorations",
-        "resizable",
-        "minimizable",
-        "movable",
-        "focus",
-        "show",
-    ];
-    for key in window.keys() {
-        if !SUPPORTED.contains(&key.as_str()) {
-            return Err(format!(
-                "{}: unsupported [window] key `{key}`",
-                path.display()
-            ));
-        }
+    let main_rs = root.join("src/main.rs");
+    if !main_rs.is_file() {
+        return Err(format!("{} needs src/main.rs", root.display()));
     }
 
-    let mut config = AppStartupConfig::default();
-    if let Some(value) = window.get("width") {
-        config.width = parse_dimension(value, "width", &path)?;
-    }
-    if let Some(value) = window.get("height") {
-        config.height = parse_dimension(value, "height", &path)?;
-    }
-    for (key, target) in [
-        ("min_width", &mut config.min_width),
-        ("min_height", &mut config.min_height),
-    ] {
-        if let Some(value) = window.get(key) {
-            *target = Some(parse_dimension(value, key, &path)?);
-        }
-    }
-    if config.min_width.is_some() != config.min_height.is_some() {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--no-deps")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("could not run cargo metadata: {error}"))?;
+    if !output.status.success() {
         return Err(format!(
-            "{}: `min_width` and `min_height` must be configured together",
-            path.display()
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    if let Some(value) = window.get("state") {
-        config.state = match value.as_str() {
-            Some("windowed") => "Windowed",
-            Some("maximized") => "Maximized",
-            Some("fullscreen") => "Fullscreen",
-            Some(value) => {
-                return Err(format!(
-                    "{}: invalid [window].state `{value}` (expected windowed, maximized, or fullscreen)",
-                    path.display()
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "{}: [window].state must be a string",
-                    path.display()
-                ));
-            }
-        };
-    }
-    if let Some(value) = window.get("decorations") {
-        config.decorations = match value.as_str() {
-            Some("client") => "Client",
-            Some("server") => "Server",
-            Some(value) => {
-                return Err(format!(
-                    "{}: invalid [window].decorations `{value}` (expected client or server)",
-                    path.display()
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "{}: [window].decorations must be a string",
-                    path.display()
-                ));
-            }
-        };
-    }
-    for (key, target) in [
-        ("resizable", &mut config.resizable),
-        ("minimizable", &mut config.minimizable),
-        ("movable", &mut config.movable),
-        ("focus", &mut config.focus),
-        ("show", &mut config.show),
-    ] {
-        if let Some(value) = window.get(key) {
-            *target = value.as_bool().ok_or_else(|| {
-                format!("{}: [window].{key} must be true or false", path.display())
-            })?;
-        }
-    }
-    Ok(config)
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("could not read cargo metadata: {error}"))?;
+    let manifest = fs::canonicalize(&manifest).map_err(|error| error.to_string())?;
+    let manifest_text = manifest.to_string_lossy();
+    let package = metadata["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages
+                .iter()
+                .find(|package| package["manifest_path"].as_str() == Some(manifest_text.as_ref()))
+        })
+        .ok_or("Cargo.toml does not declare a package in this project")?;
+    let main_rs = fs::canonicalize(main_rs).map_err(|error| error.to_string())?;
+    let main_rs_text = main_rs.to_string_lossy();
+    let binary = package["targets"]
+        .as_array()
+        .and_then(|targets| {
+            targets.iter().find(|target| {
+                let is_binary = target["kind"]
+                    .as_array()
+                    .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("bin")));
+                is_binary && target["src_path"].as_str() == Some(main_rs_text.as_ref())
+            })
+        })
+        .and_then(|target| target["name"].as_str())
+        .ok_or("Cargo.toml must define a binary target at src/main.rs")?
+        .to_owned();
+    let target_directory = metadata["target_directory"]
+        .as_str()
+        .ok_or("cargo metadata did not return a target directory")?;
+
+    Ok(RustProject {
+        root: root.to_path_buf(),
+        manifest,
+        target_directory: PathBuf::from(target_directory),
+        binary,
+    })
 }
 
-fn parse_dimension(value: &toml::Value, key: &str, path: &Path) -> Result<f32, String> {
-    let dimension = match value {
-        toml::Value::Integer(value) => *value as f32,
-        toml::Value::Float(value) => *value as f32,
-        _ => {
-            return Err(format!(
-                "{}: [window].{key} must be a positive number",
-                path.display()
-            ));
-        }
-    };
-    if !dimension.is_finite() || dimension <= 0.0 {
-        return Err(format!(
-            "{}: [window].{key} must be a positive number",
-            path.display()
-        ));
-    }
-    Ok(dimension)
-}
-
-fn compile(root: &Path, source: &Path, generated: &Path, package: &str) -> Result<(), String> {
-    let startup = read_startup_config(source)?;
-    let files = gpui_rsc::compile_directory(source, &generated.join("generated"))?;
-    let modules=files.iter().map(|file| {
-        let filename=file.file_name().unwrap().to_string_lossy();
-        let stem=filename.trim_end_matches(".inter.rs").replace('-',"_");
-        format!("pub mod {stem} {{ include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/generated/{filename}\")); }}\n")
-    }).collect::<String>();
-    write_if_changed(&generated.join("src/generated.rs"), &modules)?;
-    for relative in [
-        "src/template.rs",
-        "src/runtime/mod.rs",
-        "src/runtime/model.rs",
-        "src/runtime/component.rs",
-        "src/runtime/binding.rs",
-        "src/runtime/view.rs",
-        "build.rs",
-    ] {
-        let source = fs::read_to_string(root.join(relative)).map_err(|error| error.to_string())?;
-        write_if_changed(&generated.join(relative), &source)?;
-    }
-    let main = format!(
-        "extern crate self as gpui_rsc;\nmod template;\npub use template::*;\npub mod runtime;\nmod generated;\nfn main() {{ runtime::run_with_config(generated::app::App(), {}); }}\n",
-        startup.rust_expression()
-    );
-    write_if_changed(&generated.join("src/main.rs"), &main)?;
-    let default_features = if cfg!(feature = "debug-fps") {
-        "[\"debug-fps\"]"
-    } else {
-        "[]"
-    };
-    let manifest = format!(
-        "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = {default_features}\ndebug-fps = []\n\n[dependencies]\ngpui = {{ package = \"gpui-pre\", version = \"=0.3.7\" }}\ngpui-kit = \"0.7\"\n"
-    );
-    write_if_changed(&generated.join("Cargo.toml"), &manifest)?;
-    for file in files {
-        println!("generated {}", file.display());
-    }
-    Ok(())
-}
-fn build(root: &Path, source: &Path, generated: &Path, package: &str) -> Result<(), String> {
-    compile(root, source, generated, package)?;
-    let status = Command::new("cargo")
+fn build(project: &RustProject, cargo_args: &[String]) -> Result<PathBuf, String> {
+    compile_project(project)?;
+    let mut command = Command::new("cargo");
+    command
         .arg("build")
         .arg("--manifest-path")
-        .arg(generated.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(root.join("target"))
-        .current_dir(root)
-        .status()
-        .map_err(|e| e.to_string())?;
+        .arg(&project.manifest)
+        .arg("--bin")
+        .arg(&project.binary)
+        .args(cargo_args)
+        .current_dir(&project.root);
+    let status = command.status().map_err(|error| error.to_string())?;
     if !status.success() {
         return Err(format!("Cargo build failed: {status}"));
     }
-    let status = Command::new(root.join("target/debug").join(package))
+
+    let binary = binary_path(project, cargo_args);
+    let status = Command::new(&binary)
         .arg("--validate")
-        .current_dir(root)
+        .current_dir(&project.root)
         .status()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| format!("could not validate {}: {error}", binary.display()))?;
     if status.success() {
-        Ok(())
+        Ok(binary)
     } else {
         Err(format!("component binding validation failed: {status}"))
     }
 }
-fn launch(root: &Path, package: &str) -> Result<Child, String> {
-    Command::new(root.join("target/debug").join(package))
+
+fn compile_project(project: &RustProject) -> Result<(), String> {
+    let source = project.root.join("src");
+    let output = project.root.join("target/rsc-build/generated");
+    let files = gpui_rsc::compile_directory(&source, &output)?;
+    let mut modules = String::new();
+    let mut module_names = std::collections::HashSet::new();
+    for file in &files {
+        let filename = file
+            .file_name()
+            .expect("generated component file name")
+            .to_string_lossy();
+        let stem = filename.trim_end_matches(".inter.rs").replace('-', "_");
+        if !module_names.insert(stem.clone()) {
+            return Err(format!(
+                "multiple .rsx files in {} map to generated module `{stem}`",
+                source.display()
+            ));
+        }
+        let relative = file
+            .strip_prefix(&output)
+            .map_err(|error| {
+                format!(
+                    "could not map {} into generated tree: {error}",
+                    file.display()
+                )
+            })?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let include_path = format!("/target/rsc-build/generated/{relative}");
+        modules.push_str(&format!(
+            "pub mod {stem} {{ include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {include_path:?})); }}\n"
+        ));
+    }
+    let generated_module = project.root.join("target/rsc-build/generated.rs");
+    if let Some(parent) = generated_module.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+    if fs::read_to_string(&generated_module).ok().as_deref() != Some(&modules) {
+        fs::write(&generated_module, modules)
+            .map_err(|error| format!("could not write {}: {error}", generated_module.display()))?;
+    }
+    for file in files {
+        println!("generated {}", file.display());
+    }
+    println!("generated {}", generated_module.display());
+    Ok(())
+}
+
+fn binary_path(project: &RustProject, cargo_args: &[String]) -> PathBuf {
+    let profile = if cargo_args.iter().any(|arg| arg == "--release") {
+        "release"
+    } else if let Some(index) = cargo_args.iter().position(|arg| arg == "--profile") {
+        cargo_args
+            .get(index + 1)
+            .map(String::as_str)
+            .unwrap_or("debug")
+    } else {
+        "debug"
+    };
+    let executable = if cfg!(windows) {
+        format!("{}.exe", project.binary)
+    } else {
+        project.binary.clone()
+    };
+    project.target_directory.join(profile).join(executable)
+}
+
+fn launch(root: &Path, binary: &Path) -> Result<Child, String> {
+    Command::new(binary)
         .current_dir(root)
         .spawn()
-        .map_err(|e| e.to_string())
+        .map_err(|error| format!("could not start {}: {error}", binary.display()))
 }
-fn source_hash(root: &Path, source: &Path) -> u64 {
-    fn visit(path: &Path, h: &mut impl Hasher) {
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    visit(&p, h);
-                } else if matches!(
-                    p.extension().and_then(|s| s.to_str()),
-                    Some("rs" | "rsx" | "toml")
+
+fn source_hash(compiler_root: &Path, project_root: &Path) -> u64 {
+    fn visit(path: &Path, hasher: &mut impl Hasher) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("target" | ".git")
                 ) {
-                    p.hash(h);
-                    if let Ok(bytes) = fs::read(&p) {
-                        bytes.hash(h);
-                    }
+                    visit(&path, hasher);
+                }
+            } else if matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("rs" | "rsx" | "toml")
+            ) || path.file_name().and_then(|name| name.to_str()) == Some("Cargo.lock")
+            {
+                path.hash(hasher);
+                if let Ok(bytes) = fs::read(&path) {
+                    bytes.hash(hasher);
                 }
             }
         }
     }
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    visit(&root.join("src"), &mut h);
-    visit(source, &mut h);
-    h.finish()
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    visit(&compiler_root.join("src"), &mut hasher);
+    visit(project_root, &mut hasher);
+    hasher.finish()
 }

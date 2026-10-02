@@ -1,10 +1,18 @@
 #[cfg(feature = "compiler")]
 mod style_codegen;
+#[cfg(feature = "runtime")]
+mod template;
+#[cfg(feature = "runtime")]
+pub mod runtime;
+#[cfg(feature = "runtime")]
+pub use template::{
+    ComponentRenderFn, CompiledComponent, RenderFn, TemplateElement, TemplateNode,
+};
 // Compiler for single-file Rust JSX components.
 #[cfg(feature = "compiler")]
-use scraper::{ElementRef, Html, Node as HtmlNode, Selector};
-#[cfg(feature = "compiler")]
 use quote::ToTokens;
+#[cfg(feature = "compiler")]
+use scraper::{ElementRef, Html, Node as HtmlNode, Selector};
 #[cfg(feature = "compiler")]
 use std::{
     collections::HashMap,
@@ -29,6 +37,7 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     let template = expand_template_interpolations(&template)?;
     let component_functions = component_function_tags(&template)?;
     let template = normalize_component_tags(&template)?;
+    let template = extract_control_value_bindings(&template)?;
     let (template, mut class_bindings) = extract_class_bindings(&template)?;
     let document_source = ensure_html_document(&template);
     let document = Html::parse_document(&document_source);
@@ -308,6 +317,18 @@ fn compile_rust_components(
 ) -> Result<(), String> {
     let mut generated_components = Vec::new();
     let has_custom_definition = script.contains("fn definition(");
+    let script_functions = syn::parse_file(script)
+        .ok()
+        .map(|file| {
+            file.items
+                .into_iter()
+                .filter_map(|item| match item {
+                    syn::Item::Fn(function) => Some(function.sig.ident.to_string()),
+                    _ => None,
+                })
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
     let root_component = components.iter().find(|component| component.name == "App");
     let root_helpers = if has_custom_definition && root_component.is_some() {
         let title = if script.contains("fn title(") {
@@ -343,16 +364,24 @@ fn compile_rust_components(
         let prelude = expand_script_option_mappings(&prelude)?;
         let template = expand_template_expressions(&template)?;
         let template = expand_template_interpolations(&template)?;
+        let (template, click_actions) = extract_signal_clicks(&template)?;
         let component_functions = component_function_tags(&template)?;
         let template = normalize_component_tags(&template)?;
+        let template = extract_control_value_bindings(&template)?;
         let (template, class_bindings) = extract_class_bindings(&template)?;
         let (prelude, style_variables) =
             extract_style_variables(&prelude, class_bindings.values())?;
+        let signal_variables = component_signal_variables(&prelude)?;
         let document = Html::parse_document(&ensure_html_document(&template));
         let body = document
             .select(&Selector::parse("body").unwrap())
             .next()
             .ok_or_else(|| format!("{}: component needs markup", input.display()))?;
+        let inferred_root_bindings = if component.name == "App" && !has_custom_definition {
+            infer_component_value_bindings(body, &component.inputs, &signal_variables)
+        } else {
+            Vec::new()
+        };
         let input_locals = component_input_locals(&component.inputs)?;
         let mut gpui_functions = Vec::new();
         let tree = element_code(
@@ -379,18 +408,75 @@ fn compile_rust_components(
         let definition = if component.name == "App" && has_custom_definition {
             "definition()".to_owned()
         } else {
-            let bindings = component
+            let mut bindings = component
                 .inputs
                 .iter()
                 .map(|input| format!("gpui_rsc::{}!({:?})", input.direction, input.name))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .collect::<Vec<_>>();
+            bindings.extend(inferred_root_bindings);
+            let bindings = bindings.join(", ");
+            let title = if component.name == "App" && script_functions.contains("title") {
+                "title()".to_owned()
+            } else {
+                format!("{name:?}")
+            };
             format!(
-                "gpui_rsc::runtime::Definition::new({name:?}, {name:?}, <{struct_name} as gpui_rsc::CompiledComponent>::template(), vec![{bindings}], __rsc_render_component)"
+                "gpui_rsc::runtime::Definition::new({name:?}, {title}, <{struct_name} as gpui_rsc::CompiledComponent>::template(), vec![{bindings}], __rsc_render_component)"
             )
+        };
+        let definition = if component.name == "App" && !has_custom_definition {
+            let definition = if script_functions.contains("calculate") {
+                let on_change = if script_functions.contains("on_change") {
+                    "Some(on_change)"
+                } else {
+                    "None"
+                };
+                format!("({definition}).with_calculation(calculate, {on_change})")
+            } else {
+                definition
+            };
+            if script_functions.contains("output_format") {
+                format!("({definition}).with_output_formatter(output_format)")
+            } else {
+                definition
+            }
+        } else {
+            definition
         };
         let inputs_fn = format!("__{}_view_inputs", component.name);
         let definition = format!("({definition}).with_view_inputs({inputs_fn}())");
+        let definition = if signal_variables.is_empty() {
+            definition
+        } else {
+            let signals = signal_variables
+                .iter()
+                .map(|name| format!("({name:?}, {name}.clone())"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({definition}).with_local_signals(vec![{signals}])")
+        };
+        let definition = click_actions.iter().fold(definition, |definition, (name, expression)| {
+            let signal_clones = signal_variables
+                .iter()
+                .map(|signal| format!("let {signal} = {signal}.clone();"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let signal_references = if signal_variables.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "let _ = ({});",
+                    signal_variables
+                        .iter()
+                        .map(|signal| format!("&{signal}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!(
+                "({definition}).with_action({name:?}, {{ {signal_clones} move || {{ {signal_references} {expression}; }} }})"
+            )
+        });
         let definition = if imports.is_empty() {
             definition
         } else {
@@ -428,14 +514,171 @@ fn compile_rust_components(
 }
 
 #[cfg(feature = "compiler")]
+fn extract_signal_clicks(source: &str) -> Result<(String, Vec<(String, String)>), String> {
+    let mut output = String::with_capacity(source.len());
+    let mut actions = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find('<') {
+        let start = cursor + relative;
+        output.push_str(&source[cursor..start]);
+        if source[start..].starts_with("<!--") {
+            let end = source[start..]
+                .find("-->")
+                .ok_or("unterminated HTML comment")?
+                + start
+                + 3;
+            output.push_str(&source[start..end]);
+            cursor = end;
+            continue;
+        }
+
+        let end = html_tag_end(&source[start..])? + start;
+        let tag = &source[start..end];
+        if !tag.starts_with("</") && html_tag_name(tag) == Some("button") {
+            output.push_str(&extract_signal_click_tag(tag, &mut actions)?);
+        } else {
+            output.push_str(tag);
+        }
+        cursor = end;
+    }
+    output.push_str(&source[cursor..]);
+    Ok((output, actions))
+}
+
+#[cfg(feature = "compiler")]
+fn extract_signal_click_tag(
+    tag: &str,
+    actions: &mut Vec<(String, String)>,
+) -> Result<String, String> {
+    let Some(attribute_start) = tag.find("on-click") else {
+        return Ok(tag.to_owned());
+    };
+    let in_quotes = tag[..attribute_start]
+        .chars()
+        .fold((None, false), |(quote, escaped), character| {
+            if let Some(delimiter) = quote {
+                if escaped {
+                    (quote, false)
+                } else if character == '\\' {
+                    (quote, true)
+                } else if character == delimiter {
+                    (None, false)
+                } else {
+                    (quote, false)
+                }
+            } else if matches!(character, '\'' | '"') {
+                (Some(character), false)
+            } else {
+                (None, false)
+            }
+        })
+        .0
+        .is_some();
+    if in_quotes
+        || attribute_start == 0
+        || !tag.as_bytes()[attribute_start - 1].is_ascii_whitespace()
+    {
+        return Ok(tag.to_owned());
+    }
+
+    let name_end = attribute_start + "on-click".len();
+    if tag[name_end..]
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Ok(tag.to_owned());
+    }
+    let mut value_start = skip_ascii_whitespace(tag, name_end);
+    if tag.as_bytes().get(value_start) != Some(&b'=') {
+        return Err(
+            "on-click needs a Rust expression, for example on-click={signal.set(1)}".into(),
+        );
+    }
+    value_start = skip_ascii_whitespace(tag, value_start + 1);
+    if tag.as_bytes().get(value_start) != Some(&b'{') {
+        return Err("on-click needs a braced Rust expression".into());
+    }
+    let value_end =
+        matching_delimiter(tag, value_start, b'{', b'}').ok_or("unclosed on-click expression")?;
+    let expression = tag[value_start + 1..value_end].trim();
+    syn::parse_str::<syn::Expr>(expression)
+        .map_err(|error| format!("invalid on-click expression: {error}"))?;
+    if tag.contains("data-out") {
+        return Err("button cannot combine on-click with data-out".into());
+    }
+
+    let action = format!("__rsc_click_action_{}", actions.len());
+    actions.push((action.clone(), expression.to_owned()));
+    let attribute_start = tag[..attribute_start]
+        .rfind(char::is_whitespace)
+        .unwrap_or(attribute_start);
+    let mut output = String::with_capacity(tag.len());
+    output.push_str(&tag[..attribute_start]);
+    output.push_str(&format!(" data-out=\"{action}\""));
+    output.push_str(&tag[value_end + 1..]);
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn html_tag_name(tag: &str) -> Option<&str> {
+    let start = usize::from(tag.starts_with("</"));
+    let start = if start == 1 { 2 } else { 1 };
+    let end = tag[start..]
+        .find(|character: char| {
+            character.is_ascii_whitespace() || character == '/' || character == '>'
+        })
+        .map(|offset| start + offset)
+        .unwrap_or(tag.len());
+    tag.get(start..end)
+}
+
+#[cfg(feature = "compiler")]
+fn component_signal_variables(prelude: &str) -> Result<Vec<String>, String> {
+    let block = syn::parse_str::<syn::Block>(&format!("{{{prelude}}}"))
+        .map_err(|error| format!("invalid component prelude: {error}"))?;
+    let mut signals = Vec::new();
+    for statement in block.stmts {
+        let syn::Stmt::Local(local) = statement else {
+            continue;
+        };
+        let syn::Pat::Ident(pattern) = local.pat else {
+            continue;
+        };
+        let Some(initializer) = local.init else {
+            continue;
+        };
+        let syn::Expr::Call(call) = *initializer.expr else {
+            continue;
+        };
+        let syn::Expr::Path(path) = *call.func else {
+            continue;
+        };
+        if path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "signal")
+        {
+            signals.push(pattern.ident.to_string());
+        }
+    }
+    Ok(signals)
+}
+
+#[cfg(feature = "compiler")]
 fn component_input_locals(inputs: &[RustComponentInput]) -> Result<String, String> {
     let mut locals = String::new();
     for input in inputs {
         if input.direction == "out_param" {
             continue;
         }
-        let ty = syn::parse_str::<syn::Type>(&input.ty)
-            .map_err(|error| format!("invalid type for component parameter {}: {error}", input.name))?;
+        let ty = syn::parse_str::<syn::Type>(&input.ty).map_err(|error| {
+            format!(
+                "invalid type for component parameter {}: {error}",
+                input.name
+            )
+        })?;
         let (value_ty, by_reference) = match &ty {
             syn::Type::Reference(reference) => (reference.elem.as_ref(), true),
             other => (other, false),
@@ -446,7 +689,12 @@ fn component_input_locals(inputs: &[RustComponentInput]) -> Result<String, Strin
                 input.name, input.ty
             ));
         };
-        let Some(type_name) = path.path.segments.last().map(|segment| segment.ident.to_string()) else {
+        let Some(type_name) = path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
             return Err(format!(
                 "component parameter {} has unsupported type {}",
                 input.name, input.ty
@@ -459,8 +707,8 @@ fn component_input_locals(inputs: &[RustComponentInput]) -> Result<String, Strin
                 "let {mutable}{}: f32 = props.get({key}).and_then(|value| value.number()).unwrap_or_default();\n",
                 input.name
             ),
-            "f64" | "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32"
-            | "u64" | "usize" => format!(
+            "f64" | "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "usize" => format!(
                 "let {mutable}{}: {type_name} = props.get({key}).and_then(|value| value.number()).map(|value| value as {type_name}).unwrap_or_default();\n",
                 input.name
             ),
@@ -490,6 +738,50 @@ fn component_input_locals(inputs: &[RustComponentInput]) -> Result<String, Strin
         locals.push_str(&declaration);
     }
     Ok(locals)
+}
+
+#[cfg(feature = "compiler")]
+fn infer_component_value_bindings(
+    body: ElementRef<'_>,
+    inputs: &[RustComponentInput],
+    local_signals: &[String],
+) -> Vec<String> {
+    let mut known = inputs
+        .iter()
+        .map(|input| input.name.clone())
+        .chain(local_signals.iter().cloned())
+        .collect::<std::collections::HashSet<_>>();
+    let selector = Selector::parse("component").expect("static component selector");
+    let mut bindings = Vec::new();
+    for component in body.select(&selector) {
+        for (name, value) in component.value().attrs() {
+            if matches!(name, "name" | "class" | "style" | "mobile-style" | "id") {
+                continue;
+            }
+            let Some(expression) = value
+                .strip_prefix('[')
+                .and_then(|expression| expression.strip_suffix(']'))
+                .map(str::trim)
+            else {
+                continue;
+            };
+            let Ok(syn::Expr::Path(path)) = syn::parse_str::<syn::Expr>(expression) else {
+                continue;
+            };
+            if path.qself.is_some() || path.path.segments.len() != 1 {
+                continue;
+            }
+            let identifier = path.path.segments[0].ident.to_string();
+            if !is_simple_rust_identifier(&identifier) || !known.insert(identifier.clone()) {
+                continue;
+            }
+            bindings.push(format!(
+                "gpui_rsc::runtime::Binding::read_key({identifier:?}, {identifier:?})"
+            ));
+        }
+    }
+    bindings.sort();
+    bindings
 }
 
 #[cfg(feature = "compiler")]
@@ -734,26 +1026,76 @@ fn ensure_html_document(source: &str) -> String {
 }
 
 #[cfg(feature = "compiler")]
+/// Compile every `.rsx` file below `directory`, preserving its relative path below `output`.
 pub fn compile_directory(directory: &Path, output: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut inputs = fs::read_dir(directory)
-        .map_err(|e| e.to_string())?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("rsx"))
-        .collect::<Vec<_>>();
+    fn collect_sources(directory: &Path, inputs: &mut Vec<PathBuf>) -> Result<(), String> {
+        let entries = fs::read_dir(directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                if !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("target" | ".git")
+                ) {
+                    collect_sources(&path, inputs)?;
+                }
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rsx") {
+                inputs.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut inputs = Vec::new();
+    collect_sources(directory, &mut inputs)?;
     inputs.sort();
     if inputs.is_empty() {
         return Err(format!("no .rsx files in {}", directory.display()));
     }
     let mut outputs = Vec::new();
     for input in inputs {
-        let output_file = output.join(format!(
-            "{}.inter.rs",
-            input.file_stem().unwrap().to_string_lossy()
-        ));
+        let relative = input
+            .strip_prefix(directory)
+            .map_err(|error| format!("could not map {} into source root: {error}", input.display()))?;
+        let output_file = output.join(relative).with_extension("inter.rs");
         compile_file(&input, &output_file)?;
         outputs.push(output_file);
     }
+    let current_outputs = outputs.iter().cloned().collect::<std::collections::HashSet<_>>();
+    fn remove_stale(directory: &Path, current_outputs: &std::collections::HashSet<PathBuf>) -> Result<(), String> {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("{}: {error}", directory.display())),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("{}: {error}", directory.display()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                remove_stale(&path, current_outputs)?;
+                if fs::read_dir(&path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?
+                    .next()
+                    .is_none()
+                {
+                    fs::remove_dir(&path)
+                        .map_err(|error| format!("{}: {error}", path.display()))?;
+                }
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".inter.rs"))
+                && !current_outputs.contains(&path)
+            {
+                fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+    remove_stale(output, &current_outputs)?;
     Ok(outputs)
 }
 #[cfg(feature = "compiler")]
@@ -1008,6 +1350,7 @@ fn normalize_component_tags(source: &str) -> Result<String, String> {
 
 #[cfg(feature = "compiler")]
 fn component_attributes(source: &str) -> Result<String, String> {
+    reject_bracket_component_attributes(source)?;
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0;
     while let Some(relative) = source[cursor..].find("={") {
@@ -1021,6 +1364,68 @@ fn component_attributes(source: &str) -> Result<String, String> {
     }
     output.push_str(&source[cursor..]);
     Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn reject_bracket_component_attributes(source: &str) -> Result<(), String> {
+    const ERROR: &str =
+        "component properties must use braced expressions, for example `my_attr={a_var}`";
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'=' => {
+                cursor += 1;
+                while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                    cursor += 1;
+                }
+                match bytes.get(cursor).copied() {
+                    Some(b'[') => return Err(ERROR.into()),
+                    Some(quote @ (b'\'' | b'"')) => {
+                        let value_start = cursor + 1;
+                        let mut value_end = value_start;
+                        let mut escaped = false;
+                        while value_end < bytes.len() {
+                            if escaped {
+                                escaped = false;
+                            } else if bytes[value_end] == b'\\' {
+                                escaped = true;
+                            } else if bytes[value_end] == quote {
+                                break;
+                            }
+                            value_end += 1;
+                        }
+                        let value = source[value_start..value_end].trim();
+                        if value.starts_with('[') && value.ends_with(']') {
+                            return Err(ERROR.into());
+                        }
+                        cursor = value_end.saturating_add(1);
+                    }
+                    Some(b'{') => cursor = rust_brace_end(source, cursor)? + 1,
+                    _ => {}
+                }
+            }
+            b'\'' | b'"' => {
+                let quote = bytes[cursor];
+                cursor += 1;
+                let mut escaped = false;
+                while cursor < bytes.len() {
+                    if escaped {
+                        escaped = false;
+                    } else if bytes[cursor] == b'\\' {
+                        escaped = true;
+                    } else if bytes[cursor] == quote {
+                        cursor += 1;
+                        break;
+                    }
+                    cursor += 1;
+                }
+            }
+            b'{' => cursor = rust_brace_end(source, cursor)? + 1,
+            _ => cursor += 1,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "compiler")]
@@ -1162,7 +1567,7 @@ fn expand_script_option_mappings(source: &str) -> Result<String, String> {
         let value_open = option_tag
             .find("value=")
             .map(|index| index + "value=".len())
-            .ok_or("an option template needs `value=[expression]`")?;
+            .ok_or("an option template needs `value={expression}`")?;
         let value_open = skip_ascii_whitespace(option_tag, value_open);
         let (value_start, value_close) = match option_tag.as_bytes().get(value_open) {
             Some(b'[') => (
@@ -1255,6 +1660,7 @@ fn expand_script_template_expressions(
         let template = expand_template_expressions(&source[start..outer_end + 1])?;
         let template = expand_template_interpolations(&template)?;
         let template = normalize_component_tags(&template)?;
+        let template = extract_control_value_bindings(&template)?;
         let class_binding_offset = class_bindings.len();
         let (template, local_bindings) =
             extract_class_bindings_at(&template, class_binding_offset)?;
@@ -1422,6 +1828,184 @@ fn escape_html_attribute(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(feature = "compiler")]
+fn extract_control_value_bindings(source: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find('<') {
+        let start = cursor + relative;
+        output.push_str(&source[cursor..start]);
+        if source[start..].starts_with("<!--") {
+            let end = source[start..]
+                .find("-->")
+                .ok_or("unterminated HTML comment")?
+                + start
+                + 3;
+            output.push_str(&source[start..end]);
+            cursor = end;
+            continue;
+        }
+
+        let end = html_tag_end(&source[start..])? + start;
+        let tag = &source[start..end];
+        let name_start = if tag.starts_with("</") { 2 } else { 1 };
+        let name_end = tag[name_start..]
+            .find(|character: char| {
+                character.is_ascii_whitespace() || character == '/' || character == '>'
+            })
+            .map(|offset| name_start + offset)
+            .unwrap_or(tag.len());
+        let name = &tag[name_start..name_end];
+        if !tag.starts_with("</") && matches!(name, "input" | "select") {
+            output.push_str(&extract_control_value_binding_tag(tag, name)?);
+        } else {
+            output.push_str(tag);
+        }
+        cursor = end;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
+#[cfg(feature = "compiler")]
+fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, String> {
+    let bytes = tag.as_bytes();
+    let mut output = String::with_capacity(tag.len());
+    let mut cursor = 1 + name.len();
+    let mut copied = 0;
+    let mut value_binding = None;
+    let mut has_explicit_binding = false;
+
+    while cursor < bytes.len() {
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        if bytes
+            .get(cursor)
+            .is_none_or(|byte| matches!(byte, b'>' | b'/'))
+        {
+            cursor += 1;
+            continue;
+        }
+
+        let attribute_start = cursor;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'=' | b'>' | b'/'))
+        {
+            cursor += 1;
+        }
+        if attribute_start == cursor {
+            cursor += 1;
+            continue;
+        }
+        let attribute = &tag[attribute_start..cursor];
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            if attribute == "data-in-out" {
+                has_explicit_binding = true;
+            }
+            continue;
+        }
+        cursor += 1;
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            cursor += 1;
+        }
+        let value_start = cursor;
+        let expression = match bytes.get(cursor) {
+            Some(b'{') => {
+                let close = matching_delimiter(tag, cursor, b'{', b'}')
+                    .ok_or("unclosed control value expression")?;
+                let expression = tag[cursor + 1..close].trim();
+                cursor = close + 1;
+                (attribute == "value").then_some(expression)
+            }
+            Some(b'"' | b'\'') => {
+                let quote = bytes[cursor];
+                cursor += 1;
+                let content_start = cursor;
+                let mut escaped = false;
+                while cursor < bytes.len() {
+                    if escaped {
+                        escaped = false;
+                    } else if bytes[cursor] == b'\\' {
+                        escaped = true;
+                    } else if bytes[cursor] == quote {
+                        break;
+                    }
+                    cursor += 1;
+                }
+                if cursor >= bytes.len() {
+                    return Err("unterminated control attribute value".into());
+                }
+                let content = tag[content_start..cursor].trim();
+                let expression = content
+                    .strip_prefix('{')
+                    .and_then(|content| content.strip_suffix('}'))
+                    .map(str::trim);
+                cursor += 1;
+                if attribute == "value" {
+                    expression
+                } else {
+                    None
+                }
+            }
+            _ => {
+                while bytes
+                    .get(cursor)
+                    .is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'>')
+                {
+                    cursor += 1;
+                }
+                None
+            }
+        };
+        if attribute == "data-in-out" {
+            has_explicit_binding = true;
+        }
+        if let Some(expression) = expression {
+            if value_binding.is_some() {
+                return Err(format!("<{name}> may define its value binding only once"));
+            }
+            let binding = template_binding_path(expression).ok_or_else(|| {
+                format!(
+                    "value on <{name}> must reference a writable binding, such as value={{value}}"
+                )
+            })?;
+            output.push_str(&tag[copied..attribute_start]);
+            output.push_str(&format!("data-rsc-value-binding=\"{binding}\""));
+            copied = cursor;
+            value_binding = Some(binding);
+        }
+        if cursor <= value_start {
+            cursor = value_start + 1;
+        }
+    }
+
+    if value_binding.is_some() && has_explicit_binding {
+        return Err(format!(
+            "<{name}> value={{...}} already declares its two-way binding; remove data-in-out"
+        ));
+    }
+    if value_binding.is_some() {
+        output.push_str(&tag[copied..]);
+        Ok(output)
+    } else {
+        Ok(tag.to_owned())
+    }
 }
 
 #[cfg(feature = "compiler")]
@@ -1614,12 +2198,16 @@ fn element_code(
     gpui_functions: &mut Vec<String>,
 ) -> Result<String, String> {
     if element.value().name() == "style" {
-        return Err("<style> tags are not supported; put styles in a Rust styles({...}) bundle".into());
+        return Err(
+            "<style> tags are not supported; put styles in a Rust styles({...}) bundle".into(),
+        );
     }
     let style_id = *next_style_id;
     *next_style_id += 1;
     if element.value().attr("style").is_some() || element.value().attr("mobile-style").is_some() {
-        return Err("CSS style attributes are not supported; use a Rust styles({...}) bundle".into());
+        return Err(
+            "CSS style attributes are not supported; use a Rust styles({...}) bundle".into(),
+        );
     }
     let class_binding = element
         .value()

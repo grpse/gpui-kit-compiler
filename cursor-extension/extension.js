@@ -168,11 +168,11 @@ function tagCompletions() {
     completion(tag, "GPUI div element", `${tag}>$0</${tag}>`, vscode.CompletionItemKind.Class),
   );
   items.push(
-    completion("button", "GPUI button; use data-out for actions", 'button data-out="$1">$0</button>', vscode.CompletionItemKind.Class),
-    completion("input", "GPUI range slider", 'input type="range" min="0" max="100" step="1" value="50" data-in-out="$1" />', vscode.CompletionItemKind.Class),
-    completion("select", "GPUI selection control with Rust-mapped options", 'select id="${1:method}" data-in-out="${2:method}">{${3:methods}.iter().map(|&${4:method}| => <option value=[${4:method}]>{${4:method}}</option>)}</select>', vscode.CompletionItemKind.Class),
+    completion("button", "GPUI button; run a Rust expression when clicked", 'button on-click={$1}>$0</button>', vscode.CompletionItemKind.Class),
+    completion("input", "GPUI range slider bound to a signal or mutable value", 'input id="${1:value}" type="range" min="0" max="100" step="1" value={${2:value}} />', vscode.CompletionItemKind.Class),
+    completion("select", "GPUI selection control with Rust-mapped options", 'select id="${1:method}" value={${2:method}}>{${3:methods}.iter().map(|&${4:method}| => <option value={${4:method}}>{${4:method}}</option>)}</select>', vscode.CompletionItemKind.Class),
     completion("option", "Option for a GPUI select", 'option value="$1">$0</option>', vscode.CompletionItemKind.Class),
-    completion("output", "Read-only GPUI value output", 'output data-in="$1"></output>', vscode.CompletionItemKind.Class),
+    completion("output", "Formatted or bar output; plain values can use {name} in a div", 'output data-in="$1"></output>', vscode.CompletionItemKind.Class),
     completion("ComponentName", "Instantiate an imported Rust component function", 'ComponentName $0/>', vscode.CompletionItemKind.Class),
   );
   return items;
@@ -183,10 +183,10 @@ function attributeCompletions(tag, used) {
     ["class", "Bind a Rust style, for example {myStyles.card}", "class={myStyles.$1}"],
     ["id", "Element id; also identifies select options"],
   ];
-  if (tag === "button") attrs.push(["data-out", "Bind this button to a Rust action"], ["data-args", "Comma-separated Rust action arguments"]);
-  if (tag === "input") attrs.push(["type", "Supported control type", 'type="range"'], ["min", "Range lower bound"], ["max", "Range upper bound"], ["step", "Range increment"], ["value", "Range default value"], ["data-in-out", "Two-way Rust binding"]);
-  if (tag === "select") attrs.push(["data-in-out", "Two-way Rust binding"]);
-  if (tag === "output") attrs.push(["data-in", "Read-only Rust binding"], ["data-render", "Output presentation", 'data-render="bar"'], ["data-format", "Custom output formatter key"], ["data-suffix", "Text appended to the output"]);
+  if (tag === "button") attrs.push(["on-click", "Run a Rust expression when the button is clicked", "on-click={$1}"], ["data-out", "Legacy binding to a Rust action"], ["data-args", "Comma-separated Rust action arguments"]);
+  if (tag === "input") attrs.push(["type", "Supported control type", 'type="range"'], ["min", "Range lower bound"], ["max", "Range upper bound"], ["step", "Range increment"], ["value", "Two-way binding to a signal or mutable Rust value", 'value={$1}']);
+  if (tag === "select") attrs.push(["value", "Two-way binding to a signal or mutable Rust value", 'value={$1}']);
+  if (tag === "output") attrs.push(["data-in", "Read-only Rust binding"], ["data-render", "Output presentation", 'data-render="bar"'], ["data-format", "Custom output formatter key"]);
   if (tag === "option") attrs.push(["value", "Value written by the select"], ["selected", "Use this option as the initial value"]);
   return attrs
     .filter(([name]) => !used.has(name))
@@ -220,7 +220,7 @@ function provideCompletions(document, position) {
   const lastSelect = beforeCursor.toLowerCase().lastIndexOf("<select");
   const lastSelectClose = beforeCursor.toLowerCase().lastIndexOf("</select>");
   if (interpolation && lastSelect > lastSelectClose) {
-    return [completion("options map", "Create GPUI select options from a Rust iterator", 'methods.iter().map(|&method| => <option value=[method]>{method}</option>)', vscode.CompletionItemKind.Snippet)];
+    return [completion("options map", "Create GPUI select options from a Rust iterator", 'methods.iter().map(|&method| => <option value={method}>{method}</option>)', vscode.CompletionItemKind.Snippet)];
   }
   return undefined;
 }
