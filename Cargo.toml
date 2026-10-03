@@ -8,14 +8,18 @@ scraper = { version = "0.24", optional = true }
 syn = { version = "2", features = ["full", "visit-mut"], optional = true }
 quote = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
+prettyplease = { version = "0.2", optional = true }
 gpui = { package = "gpui-pre", version = "=0.3.7", optional = true }
 gpui-kit = { version = "0.7", optional = true }
 chrono = { version = "0.4", optional = true }
+libc = { version = "0.2", optional = true }
+async-channel = { version = "2", optional = true }
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.7", optional = true }
 
 [features]
 default = ["compiler"]
-compiler = ["dep:scraper", "dep:syn", "dep:quote", "dep:serde_json"]
-runtime = ["dep:gpui", "dep:gpui-kit", "dep:chrono"]
+compiler = ["dep:scraper", "dep:syn", "dep:quote", "dep:serde_json", "dep:prettyplease"]
+runtime = ["dep:gpui", "dep:gpui-kit", "dep:chrono", "dep:libc", "dep:async-channel", "dep:reqwest_client"]
 debug-fps = ["runtime"]
 
 [[bin]]

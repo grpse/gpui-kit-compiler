@@ -1,0 +1,9 @@
+[package]
+name = "media-playground"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui-kit = "0.7"
+gpui-rsc = { path = "../..", default-features = false, features = ["runtime"] }

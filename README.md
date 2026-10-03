@@ -1,6 +1,6 @@
 # GPUI RSX and Coffee / Lab
 
-`gpui-rsc` compiles Rust component functions with embedded markup into a GPUI Kit desktop app. The coffee app and its recipe calculations live under [`examples/coffee/src/app`](examples/coffee/src/app/app.rsx), and its Rust entry point is [`examples/coffee/src/main.rs`](examples/coffee/src/main.rs).
+`gpui-rsc` compiles Rust component functions with embedded markup into a GPUI Kit desktop app. The coffee app and its recipe calculations live under [`examples/coffee/src/app`](examples/coffee/src/app/app.rsx), and its Rust entry point is [`examples/coffee/src/main.rs`](examples/coffee/src/main.rs). The [Media Playground](examples/media-playground/README.md) demonstrates `<video>` and web images with a next-cat button.
 
 ## Build and run
 
@@ -72,6 +72,55 @@ The compiler resolves each uppercase tag to its imported function, validates the
 
 ### Native Rust components
 
+#### Direct RSX to Rust
+
+Use `#[gpui]` on a function in an `.rsx` project file to keep its Rust signature and lower markup directly to constructors and builder methods. This accepts GPUI and GPUI Kit APIs without adding tags to the compiler's HTML component list. Import the usual traits and types; Rust checks constructors, methods, argument types, and lifetimes.
+
+```rust
+use gpui_kit::{prelude::*, *};
+use gpui_kit::component::label::Label;
+
+#[gpui]
+pub fn badge(message: &str) -> impl IntoElement {
+    <gpui_kit::div flex gap-2>
+        <Label args={message.to_owned()} />
+    </gpui_kit::div>
+}
+```
+
+This becomes a regular Rust function:
+
+```rust
+pub fn badge(message: &str) -> impl IntoElement {
+    gpui_kit::div().flex().gap_2().child(Label::new(message.to_owned()))
+}
+```
+
+| RSX syntax | Rust call |
+| --- | --- |
+| `<gpui_kit::div />` or imported `<div />` | `gpui_kit::div()` or `div()` |
+| `<Button args={"save"} />` | `Button::new("save")` |
+| `<Custom args={(id, window, cx)} />` | `Custom::new(id, window, cx)` |
+| `<Custom ctor={Custom::with_state(state)} />` | `Custom::with_state(state)` |
+| `flex`, `gap-2`, `p={px(8.0)}` | `.flex()`, `.gap_2()`, `.p(px(8.0))` |
+| `disabled={true}` | `.disabled(true)` |
+| `{expression}` or nested tags | `.child(expression)` |
+| `children={items.map(\|item\| <Label args={item} />)}` | `.children(items.map(\|item\| Label::new(item)))` |
+
+Lowercase tags call functions; names ending in an uppercase type call `::new`. `args` supplies one constructor argument, or expands a tuple into multiple arguments; use `args={(tuple_value,)}` to pass a tuple as one argument. `ctor` overrides the constructor and supports generic types, alternate factories, existing entities, or complete Rust builder expressions. Builder attributes follow source order, before child nodes. A bare attribute calls a method with no arguments, so flags requiring a boolean need `={true}`. Use the actual GPUI builder methods in direct mode, for example `<img args={url} />` rather than the HTML-style `src` attribute.
+
+Rust blocks, closures, iteration, conditional branches, private functions, generic signatures, and `impl` methods are supported. If conditional branches return different element types, use `.into_any_element()` on each branch. Plain text becomes a string child with whitespace collapsed; quoted text or `{...}` preserves exact text. The compiler consumes `#[gpui]`; it is not a Rust macro. Unmarked exported markup functions continue to use the stateful component runtime described above.
+
+To convert a standalone file to ordinary Rust without generating runtime definitions:
+
+```sh
+cargo run -- convert examples/media-playground/src/native.rsx /tmp/native.rs
+```
+
+The converter also exposes `gpui_rsc::convert_source(&str)` and `gpui_rsc::convert_file(input, output)` with the `compiler` feature. It formats the output; ordinary comments are omitted, while Rust documentation attributes remain. Conversion preserves function signatures rather than the HTML runtime's signal and property semantics. Use `Definition::native` to display a converted function inside a stateful component, as demonstrated by [`native.rsx`](examples/media-playground/src/native.rsx).
+
+#### Register a native renderer
+
 An imported uppercase tag may also point to an ordinary Rust function that returns `runtime::Definition`. Use `Definition::native(name, bindings, view_inputs, renderer)` when the component needs GPUI APIs that RSX does not expose, such as `with_animation`, `with_spring`, custom painting, or an entity. The `name` is the lowercase, hyphenated form of the tag (`ExtractionIllustration` becomes `extraction-illustration`). Bindings describe the accepted properties; `view_inputs` lists readable properties to deliver to the renderer in `ComponentProps`. The renderer receives the same `Window` and `Context<HtmlView>` as generated components and returns `gpui::AnyElement`.
 
 ```rust
@@ -107,15 +156,17 @@ pub fn MethodSelect(method: &mut String) -> gpui::AnyElement {
 }
 ```
 
-`<div>` is the generic GPUI element. `<button>`, `<input>`, `<textarea>`, `<select>` with `<option>` values, `<progress>`, `<img>`, formatted `<output>`, and imported uppercase component functions lower to GPUI Kit or GPUI elements. A plain value can be displayed inline with `{name}` and ordinary text, such as `{grind}/10`. Unsupported markup elements and style declarations are reported during compilation. Component styles support flex layout, spacing, colors, fonts, borders, dimensions, positioning, alignment, opacity, overflow, and scrolling. Responsive values can use `context.viewport_width` inside the component’s `styles({...})` bundle.
+`<div>` is the generic GPUI element. `<button>`, `<input>`, `<textarea>`, `<select>` with `<option>` values, `<progress>`, `<img>`, `<video>`, formatted `<output>`, and imported uppercase component functions lower to GPUI Kit or GPUI elements. A plain value can be displayed inline with `{name}` and ordinary text, such as `{grind}/10`. Unsupported markup elements and style declarations are reported during compilation. Component styles support flex layout, spacing, colors, fonts, borders, dimensions, positioning, alignment, opacity, overflow, and scrolling. Responsive values can use `context.viewport_width` inside the component’s `styles({...})` bundle.
 
 ### Basic HTML-style elements
 
 `<img src="path/to/photo.png" alt="Photo" width="240" height="160" object-fit="cover" />` loads a local file. HTTP and HTTPS sources are also accepted. The `src` can read a component parameter or signal with `src={photo}`. Image width and height attributes are pixel values; a `class={...}` style can override them. `alt` is shown if loading fails. Supported `object-fit` values are `contain` (default), `cover`, `fill`, `scale-down`, and `none`.
 
-Inputs use the same two-way binding syntax as the existing range slider. Supported types are `range`, `text`, `email`, `password`, `search`, `url`, `tel`, `date`, and `checkbox`; text-like types use GPUI Kit’s text field. Date values are ISO `YYYY-MM-DD` strings and use GPUI Kit’s calendar picker. A checkbox binds a boolean signal through `checked={enabled}`. `<textarea value={notes}></textarea>` provides multiline text. Each input or textarea needs a unique `id` in its component. `placeholder` works on text, textarea, and date controls; `disabled` works on all except the range slider and select.
+Inputs use the same two-way binding syntax as the existing range slider. Supported types are `range`, `text`, `email`, `password`, `search`, `url`, `tel`, `date`, and `checkbox`; text-like types use GPUI Kit’s text field. Date values are ISO `YYYY-MM-DD` strings and use GPUI Kit’s calendar picker. A checkbox binds a boolean signal through `checked={enabled}`. `<textarea value={notes}></textarea>` provides multiline text. Each input or textarea needs a unique `id` in its component. `placeholder` works on text, textarea, and date controls; `disabled` works on all except the range slider and select. Text inputs and textarea also accept `readonly`; `aria-label` is passed to text fields, textarea, checkboxes, images, and progress indicators.
 
-`<progress value={fraction} max="1"></progress>` displays a read-only progress indicator; `value` may be a number or a readable binding. GPUI Kit 0.7 has no video playback component, so `<video>` is unsupported. Use a native component with a video renderer if the app needs playback.
+`<progress value={fraction} max="1"></progress>` displays a read-only progress indicator; `value` may be a number or a readable binding.
+
+`<video id="demo" src="movie.mp4" controls width="640" height="360" poster="poster.png"></video>` plays local or HTTP(S) media through GStreamer and draws decoded frames in GPUI. `src={clip}` accepts a readable binding; a nested `<source src="movie.mp4" />` is also accepted. `autoplay`, `loop`, and `muted` are supported, along with the same `object-fit` values as `<img>`. `controls` adds a play/pause button; seeking and volume sliders are not implemented. On non-Unix platforms, resuming after pause restarts the video. Playback requires `gst-launch-1.0` and GStreamer playback, video conversion, JPEG encoding, and codec plugins on the user's `PATH`.
 
 Build scoped styles with the Rust `styles({ ... })` expression. Each named style is a struct field, and properties use camelCase names that lower to GPUI style refinements. Colors accept `rgba(r, g, b)` or `rgba(r, g, b, a)` with normalized channels. Style values can use component parameters directly or pass them to Rust helpers:
 

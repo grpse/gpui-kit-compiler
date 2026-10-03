@@ -448,9 +448,6 @@ fn compile_element(
     seen: &mut HashSet<String>,
 ) -> Result<Element, String> {
     let tag = element.tag.clone();
-    if tag == "video" {
-        return Err("<video> is not supported by GPUI Kit 0.7; use a native component backed by a video renderer".into());
-    }
     if !matches!(
         tag.as_str(),
         "div"
@@ -461,6 +458,8 @@ fn compile_element(
             | "input"
             | "textarea"
             | "img"
+            | "video"
+            | "source"
             | "progress"
             | "select"
             | "button"
@@ -473,13 +472,17 @@ fn compile_element(
     }
     let attrs: HashMap<String, String> = element.attrs.iter().cloned().collect();
     let attr = |k: &str| attrs.get(k).map(String::as_str);
-    if tag == "img" && attr("src").is_none() && attr("data-in").is_none() {
-        return Err("<img> needs a src attribute".into());
+    if matches!(tag.as_str(), "img" | "video")
+        && attr("src").is_none()
+        && attr("data-in").is_none()
+        && !(tag == "video" && element.children.iter().any(|child| matches!(child, TemplateNode::Element(source) if source.tag == "source" && source.attr("src").is_some())))
+    {
+        return Err(format!("<{tag}> needs a src attribute or <source> child"));
     }
-    if tag == "img" {
+    if matches!(tag.as_str(), "img" | "video") {
         if let Some(fit) = attr("object-fit") {
             if !matches!(fit, "contain" | "cover" | "fill" | "scale-down" | "none") {
-                return Err(format!("<img> has unsupported object-fit {fit:?}"));
+                return Err(format!("<{tag}> has unsupported object-fit {fit:?}"));
             }
         }
         for name in ["width", "height"] {
@@ -488,7 +491,7 @@ fn compile_element(
                     .parse::<f32>()
                     .is_ok_and(|value| value.is_finite() && value > 0.0)
                 {
-                    return Err(format!("<img> needs a positive numeric {name}"));
+                    return Err(format!("<{tag}> needs a positive numeric {name}"));
                 }
             }
         }
@@ -560,7 +563,7 @@ fn compile_element(
         if kind == "data-in"
             && !matches!(
                 tag.as_str(),
-                "output" | "rsc-value" | "rsc-if" | "img" | "progress"
+                "output" | "rsc-value" | "rsc-if" | "img" | "video" | "progress"
             )
         {
             return Err(format!("data-in on <{tag}> requires an output element"));
@@ -740,6 +743,18 @@ fn compile_element(
             .is_none_or(|binding| !binding.direction.writes())
     {
         return Err("<button> needs data-out".into());
+    }
+    if tag == "video" {
+        let id = format!("{path}/{}", attr("id").unwrap_or("video"));
+        let id = if attr("id").is_some() {
+            id
+        } else {
+            format!("{id}-{}", seen.len())
+        };
+        if !seen.insert(id.clone()) {
+            return Err(format!("duplicate video {id}"));
+        }
+        control_id = Some(id);
     }
     let mut children = Vec::new();
     for child in &element.children {

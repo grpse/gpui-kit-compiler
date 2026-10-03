@@ -25,8 +25,25 @@ fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "run".into());
     let source = args.next().ok_or(
-        "usage: gpui-rsc [compile|build|run|dev] <cargo-project-dir> [cargo build options...]",
+        "usage: gpui-rsc [compile|build|run|dev] <cargo-project-dir> [cargo build options...]\n       gpui-rsc convert <input.rsx> <output.rs>",
     )?;
+    if mode == "convert" {
+        let output = args
+            .next()
+            .ok_or("usage: gpui-rsc convert <input.rsx> <output.rs>")?;
+        if args.next().is_some() {
+            return Err("usage: gpui-rsc convert <input.rsx> <output.rs>".into());
+        }
+        if Path::new(&source) == Path::new(&output)
+            || (fs::canonicalize(&source).ok().is_some()
+                && fs::canonicalize(&source).ok() == fs::canonicalize(&output).ok())
+        {
+            return Err("conversion output must differ from the input file".into());
+        }
+        gpui_rsc::convert_file(Path::new(&source), Path::new(&output))?;
+        println!("Converted {source} -> {output}");
+        return Ok(());
+    }
     let root = fs::canonicalize(source).map_err(|error| error.to_string())?;
     let project = load_project(&root)?;
     let cargo_args = args.collect::<Vec<_>>();

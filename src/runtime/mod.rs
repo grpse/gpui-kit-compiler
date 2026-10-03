@@ -1,6 +1,7 @@
 pub mod binding;
 mod component;
 mod model;
+mod video;
 pub mod view;
 pub use binding::{InlineStyle, Length};
 pub use component::{

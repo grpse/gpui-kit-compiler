@@ -16,6 +16,7 @@ use gpui_rsc::runtime::signal;
 
 pub fn App() -> gpui::AnyElement {
     let photo = signal("/tmp/photo.png");
+    let clip = signal("/tmp/clip.mp4");
     let date = signal("2026-10-02");
     let name = signal("Ada");
     let notes = signal("hello");
@@ -23,6 +24,8 @@ pub fn App() -> gpui::AnyElement {
     let count = signal(0.5);
     <div>
         <img src={photo} alt="A photo" width="120" height="80" object-fit="cover" />
+        <video id="clip" src={clip} controls poster="/tmp/poster.png" width="320" height="180"></video>
+        <video id="alternate" controls><source src="/tmp/alternate.mp4" /></video>
         <input id="day" type="date" value={date} />
         <input id="name" type="text" value={name} placeholder="Name" />
         <textarea id="notes" value={notes}></textarea>
@@ -40,6 +43,7 @@ pub fn App() -> gpui::AnyElement {
         "data-in",
         "data-rsc-value-binding",
         "render_image",
+        "render_video",
         "render_input",
         "render_textarea",
         "render_progress",

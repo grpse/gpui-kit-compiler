@@ -5,13 +5,14 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::runtime::binding::{self, Control, Element, InlineStyle, Node, Page};
+use crate::runtime::video::{VideoFit, VideoOptions, VideoPlayer};
 use crate::runtime::{ComponentProps, Definition, Engine, OutputFormatter, Snapshot, Value};
 use gpui_kit::component::{
     Disableable, IndexPath, TitleBar,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     date_picker::{DatePicker, DatePickerEvent, DatePickerState},
-    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    input::{Input, InputContentType, InputEvent, InputState, Textarea, TextareaState},
     progress::Progress,
     select::{Select, SelectEvent, SelectState},
     slider::{Slider, SliderEvent, SliderState},
@@ -79,6 +80,8 @@ pub struct HtmlView {
     text_inputs: HashMap<String, Entity<InputState>>,
     textareas: HashMap<String, Entity<TextareaState>>,
     dates: HashMap<String, Entity<DatePickerState>>,
+    videos: HashMap<String, Entity<VideoPlayer>>,
+    rendered_video_ids: HashSet<String>,
     subscriptions: Vec<Subscription>,
     component_views: HashMap<String, Entity<HtmlView>>,
     rendered_component_ids: HashSet<String>,
@@ -189,6 +192,8 @@ impl HtmlView {
             text_inputs: HashMap::new(),
             textareas: HashMap::new(),
             dates: HashMap::new(),
+            videos: HashMap::new(),
+            rendered_video_ids: HashSet::new(),
             subscriptions: Vec::new(),
             component_views: HashMap::new(),
             rendered_component_ids: HashSet::new(),
@@ -722,6 +727,7 @@ impl HtmlView {
                 container.child(checkbox).into_any_element()
             }
             "date" => container
+                .id(key.to_owned())
                 .w_full()
                 .when_some(self.dates.get(key), |container, state| {
                     container.child(
@@ -739,7 +745,21 @@ impl HtmlView {
             _ => container
                 .w_full()
                 .when_some(self.text_inputs.get(key), |container, state| {
-                    container.child(Input::new(state).disabled(element.attr("disabled").is_some()))
+                    let mut input = Input::new(state)
+                        .id(key.to_owned())
+                        .disabled(element.attr("disabled").is_some())
+                        .readonly(element.attr("readonly").is_some());
+                    if let Some(label) = element.attr("aria-label") {
+                        input = input.aria_label(label.to_owned());
+                    }
+                    input = match element.attr("type") {
+                        Some("email") => input.content_type(InputContentType::EmailAddress),
+                        Some("password") => input.content_type(InputContentType::Password),
+                        Some("url") => input.content_type(InputContentType::Url),
+                        Some("tel") => input.content_type(InputContentType::TelephoneNumber),
+                        _ => input,
+                    };
+                    container.child(input)
                 })
                 .into_any_element(),
         }
@@ -748,9 +768,16 @@ impl HtmlView {
     pub fn render_textarea(&self, element: &Element, container: Div) -> AnyElement {
         let key = element.control_id.as_deref().expect("textarea needs an id");
         container
+            .id(key.to_owned())
             .w_full()
             .when_some(self.textareas.get(key), |container, state| {
-                container.child(Textarea::new(state).disabled(element.attr("disabled").is_some()))
+                let mut textarea = Textarea::new(state)
+                    .disabled(element.attr("disabled").is_some())
+                    .readonly(element.attr("readonly").is_some());
+                if let Some(label) = element.attr("aria-label") {
+                    textarea = textarea.aria_label(label.to_owned());
+                }
+                container.child(textarea)
             })
             .into_any_element()
     }
@@ -778,9 +805,10 @@ impl HtmlView {
             _ => ObjectFit::Contain,
         };
         let alt = element.attr("alt").unwrap_or_default().to_owned();
+        let fallback_alt = alt.clone();
         let mut image = img(source)
             .object_fit(fit)
-            .with_fallback(move || div().child(alt.clone()).into_any_element());
+            .with_fallback(move || div().child(fallback_alt.clone()).into_any_element());
         if let Some(width) = element
             .attr("width")
             .and_then(|value| value.parse::<f32>().ok())
@@ -794,7 +822,84 @@ impl HtmlView {
             image = image.h(px(height));
         }
         image.style().refine(&style);
-        image.into_any_element()
+        if let Some(id) = element.attr("id") {
+            let mut image = image.id(id.to_owned());
+            if !alt.is_empty() {
+                image = image.role(Role::Image).aria_label(alt);
+            }
+            image.into_any_element()
+        } else if !alt.is_empty() {
+            image.role(Role::Image).aria_label(alt).into_any_element()
+        } else {
+            image.into_any_element()
+        }
+    }
+
+    pub fn render_video(
+        &mut self,
+        element: &Element,
+        style: InlineStyle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let source = element
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.get(&self.snapshot))
+            .map(|value| value.text())
+            .or_else(|| element.attr("src").map(str::to_owned))
+            .or_else(|| {
+                element.children.iter().find_map(|child| match child {
+                    Node::Element(source) if source.tag == "source" => {
+                        source.attr("src").map(str::to_owned)
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        let key = element
+            .control_id
+            .as_deref()
+            .expect("video needs a stable id")
+            .to_owned();
+        self.rendered_video_ids.insert(key.clone());
+        let visual_id = element.attr("id").unwrap_or(&key).to_owned();
+        let fit = match element.attr("object-fit").unwrap_or("contain") {
+            "cover" => VideoFit::Cover,
+            "fill" => VideoFit::Fill,
+            "scale-down" => VideoFit::ScaleDown,
+            "none" => VideoFit::None,
+            _ => VideoFit::Contain,
+        };
+        let options = VideoOptions {
+            id: visual_id,
+            source,
+            poster: element.attr("poster").map(str::to_owned),
+            controls: element.attr("controls").is_some(),
+            autoplay: element.attr("autoplay").is_some(),
+            looping: element.attr("loop").is_some(),
+            muted: element.attr("muted").is_some(),
+            fit,
+            width: element
+                .attr("width")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(320.0),
+            height: element
+                .attr("height")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(180.0),
+            style,
+        };
+        let player = if let Some(player) = self.videos.get(&key) {
+            let player = player.clone();
+            player.update(cx, |player, cx| player.update_options(options, window, cx));
+            player
+        } else {
+            let player = cx.new(|cx| VideoPlayer::new(options, window, cx));
+            self.videos.insert(key, player.clone());
+            player
+        };
+        div().child(player).into_any_element()
     }
 
     pub fn render_progress(
@@ -821,6 +926,9 @@ impl HtmlView {
             .unwrap_or(1.0);
         let mut progress = Progress::new(element.attr("id").unwrap_or("progress").to_owned())
             .value((value / max * 100.0).clamp(0.0, 100.0));
+        if let Some(label) = element.attr("aria-label") {
+            progress = progress.accessibility_label(label.to_owned());
+        }
         progress.style().refine(&style);
         container.child(progress).into_any_element()
     }
@@ -836,9 +944,12 @@ impl Render for HtmlView {
         let props = self.props.clone();
         let render_component = self.page.renderer;
         self.rendered_component_ids.clear();
+        self.rendered_video_ids.clear();
         let root = render_component(self, &props, viewport_width, window, cx);
         self.component_views
             .retain(|id, _| self.rendered_component_ids.contains(id));
+        self.videos
+            .retain(|id, _| self.rendered_video_ids.contains(id));
         if self.embedded {
             return div().w_full().child(root);
         }
@@ -890,6 +1001,13 @@ pub fn run(definition: Definition) {
     run_with_config(definition, StartupConfig::default());
 }
 
+fn configure_application(app: Application) -> Application {
+    // Native GPUI defaults to a client that rejects network requests.
+    // Install its matching HTTP implementation before any URL images load.
+    app.with_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::new()))
+        .with_assets(assets::Assets)
+}
+
 pub fn run_with_config(definition: Definition, startup: StartupConfig) {
     let calculate = definition.calculate.unwrap_or(identity_snapshot);
     let on_change = definition.on_change;
@@ -901,7 +1019,7 @@ pub fn run_with_config(definition: Definition, startup: StartupConfig) {
     if std::env::args().nth(1).as_deref() == Some("--validate") {
         return;
     }
-    application().with_assets(assets::Assets).run(move |cx| {
+    configure_application(application()).run(move |cx| {
         init(cx);
         let restore_bounds =
             Bounds::centered(None, size(px(startup.width), px(startup.height)), cx);
@@ -940,6 +1058,79 @@ pub fn run_with_config(definition: Definition, startup: StartupConfig) {
         )
         .expect("failed to open GPUI window");
     });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod image_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::{Duration, Instant},
+    };
+
+    #[::core::prelude::v1::test]
+    fn runtime_loads_and_decodes_successive_url_images() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut requests = Vec::new();
+            while requests.len() < 4 && Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let path = request.split_whitespace().nth(1).unwrap();
+                if let Some(query) = path.strip_prefix("/cat?") {
+                    write!(stream, "HTTP/1.1 302 Found\r\nLocation: /photo?{query}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    let photo = include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/tests/fixtures/photo.jpg"
+                    ));
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", photo.len()).unwrap();
+                    stream.write_all(photo).unwrap();
+                }
+                requests.push(path.to_owned());
+            }
+            requests
+        });
+        configure_application(gpui_kit::platform::headless()).run(move |cx| {
+            let executor = cx.foreground_executor().clone();
+            for nonce in [1, 2] {
+                let source = Resource::Uri(format!("http://{address}/cat?fresh={nonce}").into());
+                let image = executor
+                    .block_with_timeout(Duration::from_secs(5), ImageAssetLoader::load(source, cx))
+                    .ok()
+                    .expect("image request timed out")
+                    .expect("runtime failed to load the URL image");
+                assert_eq!(image.size(0), size(DevicePixels(8), DevicePixels(8)));
+            }
+            // Quit once the headless platform's event loop has started.
+            cx.spawn(async move |cx| cx.update(|cx| cx.quit())).detach();
+        });
+        assert_eq!(
+            server.join().unwrap(),
+            [
+                "/cat?fresh=1",
+                "/photo?fresh=1",
+                "/cat?fresh=2",
+                "/photo?fresh=2",
+            ]
+        );
+    }
 }
 
 fn identity_snapshot(values: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot {

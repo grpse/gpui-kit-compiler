@@ -1,3 +1,5 @@
+#[cfg(feature = "compiler")]
+mod native_codegen;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 #[cfg(feature = "compiler")]
@@ -19,14 +21,46 @@ use std::{
 };
 
 #[cfg(feature = "compiler")]
+/// Lower RSX expressions into ordinary Rust constructors and builder calls.
+/// Function signatures, imports, and Rust expressions retain their semantics.
+pub fn convert_source(source: &str) -> Result<String, String> {
+    native_codegen::convert(source)
+}
+
+#[cfg(feature = "compiler")]
+pub fn convert_file(input: &Path, output: &Path) -> Result<(), String> {
+    let source = fs::read_to_string(input).map_err(|e| e.to_string())?;
+    let generated = convert_source(&source)?;
+    write_generated(output, &generated)
+}
+
+#[cfg(feature = "compiler")]
+fn write_generated(output: &Path, generated: &str) -> Result<(), String> {
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if fs::read_to_string(output).ok().as_deref() != Some(generated) {
+        fs::write(output, generated).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "compiler")]
 pub fn compile_file(input: &Path, output: &Path) -> Result<(), String> {
     if input.extension().and_then(|s| s.to_str()) != Some("rsx") {
         return Err(format!("{} is not .rsx", input.display()));
     }
     let source = fs::read_to_string(input).map_err(|e| e.to_string())?;
+    let (source, native_converted) = native_codegen::convert_marked(&source)?;
     if !source.contains("<script>") {
         if let Some((script, components)) = rust_component_functions(&source, input)? {
             return compile_rust_components(input, output, &script, &components);
+        }
+        if native_converted {
+            return write_generated(output, &native_codegen::format_rust(&source)?);
         }
     }
     let sections = component_sections(&source, input)?;
@@ -1866,7 +1900,10 @@ fn extract_control_value_bindings(source: &str) -> Result<String, String> {
             .unwrap_or(tag.len());
         let name = &tag[name_start..name_end];
         if !tag.starts_with("</")
-            && matches!(name, "input" | "select" | "textarea" | "img" | "progress")
+            && matches!(
+                name,
+                "input" | "select" | "textarea" | "img" | "video" | "progress"
+            )
         {
             output.push_str(&extract_control_value_binding_tag(tag, name)?);
         } else {
@@ -1880,8 +1917,8 @@ fn extract_control_value_bindings(source: &str) -> Result<String, String> {
 
 #[cfg(feature = "compiler")]
 fn extract_control_value_binding_tag(tag: &str, name: &str) -> Result<String, String> {
-    let read_only = matches!(name, "img" | "progress");
-    let target = if name == "img" {
+    let read_only = matches!(name, "img" | "video" | "progress");
+    let target = if matches!(name, "img" | "video") {
         "src"
     } else if name == "input" && html_attribute(tag, "type").as_deref() == Some("checkbox") {
         "checked"
@@ -2224,9 +2261,6 @@ fn element_code(
             "<style> tags are not supported; put styles in a Rust styles({...}) bundle".into(),
         );
     }
-    if element.value().name() == "video" {
-        return Err("<video> is not supported by GPUI Kit 0.7; use a native component backed by a video renderer".into());
-    }
     let style_id = *next_style_id;
     *next_style_id += 1;
     if element.value().attr("style").is_some() || element.value().attr("mobile-style").is_some() {
@@ -2318,6 +2352,8 @@ fn element_code(
             "input" => "{ let control_style = container.style().clone(); view.render_input(element, container, control_style) }".to_owned(),
             "textarea" => "view.render_textarea(element, container)".to_owned(),
             "img" => "{ let image_style = container.style().clone(); view.render_image(element, image_style) }".to_owned(),
+            "video" => "{ let video_style = container.style().clone(); view.render_video(element, video_style, window, cx) }".to_owned(),
+            "source" => "container.into_any_element()".to_owned(),
             "progress" => "{ let progress_style = container.style().clone(); view.render_progress(element, container, progress_style) }".to_owned(),
             "select" => "view.render_select(element, container)".to_owned(),
             "button" if element.value().attr("data-out").is_some() => {
