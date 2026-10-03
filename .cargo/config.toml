@@ -1,2 +1,11 @@
+[build]
+target-dir = "target"
+
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1
+
 [env]
 RUST_FONTCONFIG_DLOPEN = "1"

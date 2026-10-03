@@ -2,6 +2,7 @@
 name = "gpui-rsc"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 
 [dependencies]
 scraper = { version = "0.24", optional = true }

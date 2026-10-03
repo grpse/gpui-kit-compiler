@@ -105,7 +105,7 @@ fn load_project(root: &Path) -> Result<RustProject, String> {
         return Err(format!("{} needs src/main.rs", root.display()));
     }
 
-    let output = Command::new("cargo")
+    let output = cargo_command()
         .arg("metadata")
         .arg("--no-deps")
         .arg("--format-version")
@@ -162,7 +162,7 @@ fn load_project(root: &Path) -> Result<RustProject, String> {
 
 fn build(project: &RustProject, cargo_args: &[String]) -> Result<PathBuf, String> {
     compile_project(project)?;
-    let mut command = Command::new("cargo");
+    let mut command = cargo_command();
     command
         .arg("build")
         .arg("--manifest-path")
@@ -262,6 +262,11 @@ fn launch(root: &Path, binary: &Path) -> Result<Child, String> {
         .current_dir(root)
         .spawn()
         .map_err(|error| format!("could not start {}: {error}", binary.display()))
+}
+
+fn cargo_command() -> Command {
+    // `cargo run` supplies its executable so nested builds use the same toolchain.
+    Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
 
 fn source_hash(compiler_root: &Path, project_root: &Path) -> u64 {

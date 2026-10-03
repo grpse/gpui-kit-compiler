@@ -4,6 +4,10 @@
 
 ## Build and run
 
+Use Rust 1.95 or newer. The repository selects the stable toolchain when Cargo is managed by rustup. If Homebrew's standalone Rust takes precedence, put the rustup proxies first in your `PATH` (`export PATH="$(brew --prefix rustup)/bin:$PATH"`). Nested example builds use the Cargo executable that launched the compiler.
+
+Repository builds share the root `target` cache and use line-level debug information to keep the GPUI examples' disk usage manageable. Generated RSX sources remain in each example's `target/rsc-build` directory.
+
 ```sh
 cargo run -- compile examples/coffee
 cargo run --manifest-path examples/coffee/Cargo.toml # after compiling .rsx files

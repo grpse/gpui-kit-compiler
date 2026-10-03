@@ -8,6 +8,8 @@ cargo run -- run examples/media-playground
 
 The left card plays a bundled MP4 through the `<video>` component. Install `gst-launch-1.0` and GStreamer playback, video conversion, JPEG encoding, and codec plugins to use it. The right card loads a random cat from [CATAAS](https://cataas.com/); **Show another cat** changes the image URL so GPUI requests a new photo. Cat photos need an internet connection.
 
+On macOS with Homebrew, install the video dependencies with `brew install gstreamer`.
+
 The runtime installs GPUI's desktop HTTP client automatically for web images and video posters.
 
 The footer uses [`src/native.rsx`](src/native.rsx): a `#[gpui]` function with a qualified GPUI Kit tag and an imported `Label`. These convert directly to Rust constructor and builder calls. `Definition::native` makes the function available to the stateful app as `<NativeBadge />`.
