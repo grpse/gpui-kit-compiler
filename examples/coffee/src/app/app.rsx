@@ -397,48 +397,10 @@ pub fn App() -> gpui::AnyElement {
                         <button id="tab-actions" on-click={active_tab.set("actions")} class={myStyles.actions}>What you did</button>
                     </div>
                     <div class={myStyles.tabContent}>
-                {if active_tab == "recipe" {
-                        <CoffeeVariablesForm
-                            class={myStyles.tabPanel}
-                            section={"recipe"}
-                            method={method}
-                            dose={dose}
-                            water={water}
-                            grind={grind}
-                            temperature={temperature}
-                            time={time}
-                            pours={pours}
-                            stirs={stirs}
-                            swirls={swirls}
-                            filter={filter}
-                        />
-                } else {
-                {if active_tab == "prediction" {
-                        <CoffeeProfile
-                            class={myStyles.tabPanel}
-                            acidity={acidity}
-                            target_acidity={target_acidity}
-                            sweetness={sweetness}
-                            target_sweetness={target_sweetness}
-                            bitterness={bitterness}
-                            target_bitterness={target_bitterness}
-                            body={body}
-                            target_body={target_body}
-                            clarity={clarity}
-                            target_clarity={target_clarity}
-                            astringency={astringency}
-                            target_astringency={target_astringency}
-                            intensity={intensity}
-                            target_intensity={target_intensity}
-                            notes={notes}
-                            ratio={ratio}
-                            extraction_signal={extraction_signal}
-                        />
-                } else {
-                        <div class={myStyles.actionsPanel}>
+                        {if active_tab == "recipe" {
                             <CoffeeVariablesForm
                                 class={myStyles.tabPanel}
-                                section={"actions"}
+                                section={"recipe"}
                                 method={method}
                                 dose={dose}
                                 water={water}
@@ -450,14 +412,52 @@ pub fn App() -> gpui::AnyElement {
                                 swirls={swirls}
                                 filter={filter}
                             />
-                            <button
-                                id="reset"
-                                on-click={reset_recipe(&method, &filter, &dose, &water, &grind, &temperature, &time, &pours, &stirs, &swirls)}
-                                class={myStyles.resetButton}
-                            >Reset recipe</button>
-                        </div>
-                }}
-                }}
+                        } else {
+                            {if active_tab == "prediction" {
+                                <CoffeeProfile
+                                    class={myStyles.tabPanel}
+                                    acidity={acidity}
+                                    target_acidity={target_acidity}
+                                    sweetness={sweetness}
+                                    target_sweetness={target_sweetness}
+                                    bitterness={bitterness}
+                                    target_bitterness={target_bitterness}
+                                    body={body}
+                                    target_body={target_body}
+                                    clarity={clarity}
+                                    target_clarity={target_clarity}
+                                    astringency={astringency}
+                                    target_astringency={target_astringency}
+                                    intensity={intensity}
+                                    target_intensity={target_intensity}
+                                    notes={notes}
+                                    ratio={ratio}
+                                    extraction_signal={extraction_signal}
+                                />
+                            } else {
+                                <div class={myStyles.actionsPanel}>
+                                    <CoffeeVariablesForm
+                                        class={myStyles.tabPanel}
+                                        section={"actions"}
+                                        method={method}
+                                        dose={dose}
+                                        water={water}
+                                        grind={grind}
+                                        temperature={temperature}
+                                        time={time}
+                                        pours={pours}
+                                        stirs={stirs}
+                                        swirls={swirls}
+                                        filter={filter}
+                                    />
+                                    <button
+                                        id="reset"
+                                        on-click={reset_recipe(&method, &filter, &dose, &water, &grind, &temperature, &time, &pours, &stirs, &swirls)}
+                                        class={myStyles.resetButton}
+                                        >Reset recipe</button>
+                                </div>
+                            }}
+                        }}
                     </div>
                 </div>
             </div>

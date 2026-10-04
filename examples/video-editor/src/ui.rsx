@@ -372,32 +372,32 @@ impl Render for Editor {
                 <Button args={"import"} primary label="Import video…" disabled={self.probing||self.exporting} on-click={cx.listener(|_,_,window,cx|{
                     let choice=cx.prompt_for_paths(PathPromptOptions{files:true,directories:false,multiple:false,prompt:Some("Import video".into())});
                     cx.spawn_in(window,async move|this,cx|{if let Ok(Ok(Some(paths)))=choice.await{if let Some(path)=paths.into_iter().next(){let _=this.update_in(cx,|this,window,cx|this.import(path,window,cx));}}}).detach();
-                })} />
+                    })} />
                 <Button args={"export"} label="Export MP4…" disabled={self.media.is_none()||self.exporting||self.probing} on-click={cx.listener(|this,_,window,cx|{
                     let Some(media)=&this.media else{return;};let directory=media.path.parent().unwrap_or(std::path::Path::new("."));
                     let choice=cx.prompt_for_new_path(directory,Some("edited.mp4"));
                     cx.spawn_in(window,async move|this,cx|{if let Ok(Ok(Some(output)))=choice.await{let _=this.update(cx,|this,cx|this.start_export(output,cx));}}).detach();
-                })} />
+                    })} />
             </div>
             <div flex-1 min-h-0><h_resizable args={"editor-panes"}>
-                <resizable_panel><div flex flex-col size-full min-h-0>
+                    <resizable_panel><div flex flex-col size-full min-h-0>
                     <TabBar args={"editor-tabs"} selected-index={self.tab} on-click={cx.listener(|this,index,_,cx|{this.tab=*index;cx.notify();})}><Tab label="Preview" /><Tab label="Clip info" /><Tab label="Exports" /></TabBar>
-                    <div flex-1 min-h-0>{body}</div>
-                </div></resizable_panel>
-                <resizable_panel size={px(300.)} size-range={px(260.)..px(500.)}>
-                    <div id="edit-settings" flex flex-col gap-3 p-4 size-full overflow-y-scroll>
-                        <div font-semibold>Trim clip</div><div text-xs>Start (seconds)</div><Input args={&self.start} disabled={self.exporting} />
-                        <div text-xs>End (seconds)</div><Input args={&self.end} disabled={self.exporting} />
-                        <Button args={"mark-start"} label="Set start to preview time" disabled={self.media.is_none()||self.exporting} on-click={cx.listener(|this,_,window,cx|{let value=this.position.read(cx).value();this.start.update(cx,|input,cx|input.set_value(value,window,cx));cx.notify();})} />
-                        <Button args={"mark-end"} label="Set end to preview time" disabled={self.media.is_none()||self.exporting} on-click={cx.listener(|this,_,window,cx|{let value=this.position.read(cx).value();this.end.update(cx,|input,cx|input.set_value(value,window,cx));cx.notify();})} />
-                        <div font-semibold>Transform</div>
-                        <Button args={"rotate"} label={format!("Rotate: {}°",self.rotation)} disabled={self.exporting} on-click={cx.listener(|this,_,_,cx|{this.rotation=(this.rotation+90)%360;this.refresh_frame(cx);})} />
-                        <Button args={"resize"} label={match self.width{None=>"Size: original".into(),Some(width)=>format!("Width: {width}px")}} disabled={self.exporting} on-click={cx.listener(|this,_,_,cx|{this.width=match this.width{None=>Some(1280),Some(1280)=>Some(720),_=>None};this.refresh_frame(cx);})} />
-                        <Button args={"mute"} label={if self.mute{"Audio: muted"}else{"Audio: keep"}} disabled={self.exporting} on-click={cx.listener(|this,_,_,cx|{this.mute=!this.mute;cx.notify();})} />
-                        <div text-xs>Exports re-encode video as H.264 and audio as AAC. Existing files are preserved.</div>
-                    </div>
-                </resizable_panel>
-            </h_resizable></div>
+                            <div flex-1 min-h-0>{body}</div>
+                        </div></resizable_panel>
+                    <resizable_panel size={px(300.)} size-range={px(260.)..px(500.)}>
+                        <div id="edit-settings" flex flex-col gap-3 p-4 size-full overflow-y-scroll>
+                            <div font-semibold>Trim clip</div><div text-xs>Start (seconds)</div><Input args={&self.start} disabled={self.exporting} />
+                            <div text-xs>End (seconds)</div><Input args={&self.end} disabled={self.exporting} />
+                            <Button args={"mark-start"} label="Set start to preview time" disabled={self.media.is_none()||self.exporting} on-click={cx.listener(|this,_,window,cx|{let value=this.position.read(cx).value();this.start.update(cx,|input,cx|input.set_value(value,window,cx));cx.notify();})} />
+                            <Button args={"mark-end"} label="Set end to preview time" disabled={self.media.is_none()||self.exporting} on-click={cx.listener(|this,_,window,cx|{let value=this.position.read(cx).value();this.end.update(cx,|input,cx|input.set_value(value,window,cx));cx.notify();})} />
+                            <div font-semibold>Transform</div>
+                            <Button args={"rotate"} label={format!("Rotate: {}°",self.rotation)} disabled={self.exporting} on-click={cx.listener(|this,_,_,cx|{this.rotation=(this.rotation+90)%360;this.refresh_frame(cx);})} />
+                            <Button args={"resize"} label={match self.width{None=>"Size: original".into(),Some(width)=>format!("Width: {width}px")}} disabled={self.exporting} on-click={cx.listener(|this,_,_,cx|{this.width=match this.width{None=>Some(1280),Some(1280)=>Some(720),_=>None};this.refresh_frame(cx);})} />
+                            <Button args={"mute"} label={if self.mute{"Audio: muted"}else{"Audio: keep"}} disabled={self.exporting} on-click={cx.listener(|this,_,_,cx|{this.mute=!this.mute;cx.notify();})} />
+                            <div text-xs>Exports re-encode video as H.264 and audio as AAC. Existing files are preserved.</div>
+                        </div>
+                    </resizable_panel>
+                </h_resizable></div>
             <div p-4 flex flex-col gap-2>
                 <div>{format!("Selected range: {trim_start:.3}s → {trim_end:.3}s · clip {duration:.3}s")}</div>
                 <div relative w-full h={px(28.)} rounded-md bg={cx.theme().muted}>
