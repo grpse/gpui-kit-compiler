@@ -517,13 +517,13 @@ impl EditorState {
                     "Videos" => Some(Kind::Video),
                     _ => None,
                 };
-                if let Some(kind) = kind {
-                    if let Some(index) = self.assets.iter().position(|asset| asset.kind == kind) {
-                        self.selected = index;
-                        self.checked = BTreeSet::from([index]);
-                        self.position = 0.;
-                        self.inspector = if kind == Kind::Audio { 1 } else { 0 };
-                    }
+                if let Some(kind) = kind
+                    && let Some(index) = self.assets.iter().position(|asset| asset.kind == kind)
+                {
+                    self.selected = index;
+                    self.checked = BTreeSet::from([index]);
+                    self.position = 0.;
+                    self.inspector = if kind == Kind::Audio { 1 } else { 0 };
                 }
             }
             Action::Folder(v) => {
@@ -654,7 +654,7 @@ impl EditorState {
                 visible: true,
                 locked: false,
             }),
-            Action::Zoom(v) => self.zoom = (self.zoom + v).clamp(0.6, 2.),
+            Action::Zoom(v) => self.zoom = (self.zoom + v).clamp(0.25, 8.),
             Action::Dismiss => self.notice = None,
             Action::Export => {
                 self.notice = Some("Mock export queued · My Project.mp4 · 4K / H.264".into())
@@ -754,7 +754,9 @@ mod tests {
         s.apply(Action::AddTrack);
         assert_eq!(s.tracks.len(), 5);
         s.apply(Action::Zoom(100.));
-        assert_eq!(s.zoom, 2.);
+        assert_eq!(s.zoom, 8.);
+        s.apply(Action::Zoom(-100.));
+        assert_eq!(s.zoom, 0.25);
         s.apply(Action::Screen(Screen::Tracking));
         assert_eq!(s.inspector, 2);
         assert!(s.screen.has_timeline());

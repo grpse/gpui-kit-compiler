@@ -112,7 +112,7 @@ impl Edit {
         if !matches!(self.rotation, 0 | 90 | 180 | 270) {
             return Err("Rotation must be 0, 90, 180 or 270 degrees.".into());
         }
-        if self.width.is_some_and(|w| w < 2 || w > 7680 || w % 2 != 0) {
+        if self.width.is_some_and(|w| !(2..=7680).contains(&w) || w % 2 != 0) {
             return Err("Output width must be an even number between 2 and 7680.".into());
         }
         if self
@@ -241,15 +241,14 @@ fn run(
     let stdout = child.stdout.take().unwrap();
     let reader = thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some((sender, duration)) = &progress {
-                if let Some(value) = line
+            if let Some((sender, duration)) = &progress
+                && let Some(value) = line
                     .strip_prefix("out_time_us=")
                     .and_then(|s| s.parse::<f64>().ok())
-                {
-                    let _ = sender.try_send(ExportEvent::Progress(
-                        (value / 1_000_000. / duration).clamp(0., 0.99) as f32,
-                    ));
-                }
+            {
+                let _ = sender.try_send(ExportEvent::Progress(
+                    (value / 1_000_000. / duration).clamp(0., 0.99) as f32,
+                ));
             }
         }
     });

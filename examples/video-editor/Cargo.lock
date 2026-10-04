@@ -5753,6 +5753,7 @@ name = "rsx-video-editor"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "gpui-base",
  "gpui-kit",
  "gpui-rsc",
  "serde_json",

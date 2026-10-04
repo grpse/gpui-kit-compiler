@@ -13,35 +13,38 @@ cargo run -- compile examples/video-editor
 cargo run --manifest-path examples/video-editor/Cargo.toml --target-dir target
 ```
 
-Start on a specific screen by appending `-- --library`, `-- --overview`, or `-- --tracking` to the second command. The window starts at 1536 × 980 and supports sizes down to 1100 × 740. Each workspace card has a draggable tab: drag it onto another card to group tabs, or onto a highlighted edge to split the workspace. Drag dividers to resize; the title-bar expand button zooms a card. Navigation, media/presets, player, inspector, timeline, processing, details, and generated assets all use the same dock host. The Edit/Tracking workspace and Media/Overview workspace retain separate layouts during the session; **Reset layout** restores the current workspace. Content scrolls inside its card, and library columns follow its actual width. Layouts are currently kept in memory only. The preview fullscreen button expands the player within the application.
+Start on a specific screen by appending `-- --library`, `-- --overview`, or `-- --tracking` to the second command. The window starts at 1536 × 980 and supports sizes down to 1100 × 740. Each workspace card has a draggable tab: drag it onto another card to group tabs, or onto a highlighted edge to split the workspace. The gaps between cards are nine-pixel resize targets with visible grips. Drag either vertical or horizontal divisions to resize, down to the native 100-pixel minimum per dock slot; the title-bar expand button zooms a card. Navigation, media/presets, player, inspector, timeline, processing, details, and generated assets all use the same dock host. The Edit/Tracking workspace and Media/Overview workspace retain separate layouts during the session; **Reset layout** restores the current workspace. Content scrolls inside its card, and library columns follow its actual width. Layouts are currently kept in memory only. The preview fullscreen button expands the player within the application.
 
 ## Components
 
-Every rendered element of the new UI lives in `.rsx`, using native `#[gpui]` markup. The normal Rust files contain startup, fixtures, and state transitions.
+The default application starts through the free `entry(window, cx)` function in `src/ui.rsx`. Views are free `#[gpui]` functions composed from smaller `.rsx` components. Native state and docking contracts stay in Rust; their required `Render` implementations simply delegate to the view functions. This supports incremental adoption: replace one view at a time while keeping existing entities, events, and lifecycle code. The separate legacy demo retains its original implementation.
 
 | Source | Responsibility |
 | --- | --- |
-| `src/ui.rsx` | Editor entity, input subscriptions, action dispatch, and screen composition |
+| `src/ui.rsx` | Function entry point and root screen composition |
+| `src/editor.rs` | Editor entity, input subscriptions, action dispatch, thin Render bridge |
+| `src/workspace.rs`, `src/dock_skin.rs` | Native docking contracts, workspace construction, renderer adapters |
 | `src/components/primitives.rsx` | Palette, icons, action buttons, clipped fixture photos, thumbnails, waveforms, progress bars, section headings, metadata rows |
-| `src/components/workspace.rsx` | Reusable dock panel, native DockArea/DockSkin, responsive card bounds, separate workspace layouts |
+| `src/components/workspace.rsx`, `src/components/docking.rsx` | Card content routing, measured bounds, island frames, headers, and resize grips |
 | `src/components/presets.rsx` | Text, effects, transitions, elements, and captions browsers, preset tiles and sample transcript |
-| `src/components/chrome.rsx` | Top bar, screen navigation, tool sidebar, and folders |
-| `src/components/library.rsx` | Compact/full media library, cards/list rows, search and filters, import area, processing queue |
-| `src/components/player.rsx` | Shared preview, transport controls, seek slider, tracking overlay, filmstrip, details tabs, generated assets |
-| `src/components/inspector.rsx` | Reusable property sliders/toggles, collapsible transform/crop/compositing sections, tracking, audio, effects, color |
+| `src/components/chrome.rsx`, `src/components/navigation.rsx` | Top bar, screen navigation, tool sidebar, and folders |
+| `src/components/library.rsx`, `src/components/processing.rsx` | Media library, cards/list rows, search and filters; separate import area and processing queue |
+| `src/components/player.rsx`, `src/components/details.rsx` | Preview, transport, seek slider, overlay, filmstrip; separate details and generated assets |
+| `src/components/inspector.rsx`, `src/components/properties.rsx`, `src/components/tracking.rsx` | Inspector composition, reusable property controls, separate tracking interface |
 | `src/components/timeline.rsx` | Tool strip, ruler, tracks, clips, filmstrips, waveforms, automation path, playhead, zoom |
+| `src/components/tracks.rsx` | Channel controls, Add Track, and their draggable width divider |
 | `src/state.rs` | Typed actions, deterministic media/jobs/tracks/clip fixtures, bounded event log, state tests |
 | `src/legacy.rsx`, `src/model.rs` | Preserved FFmpeg example, available separately with `--legacy` |
 
 Audio and Images select matching fixture previews and reset incompatible filters when opened. Every tool in the editing sidebar opens its own browser; selecting a tool also reveals the media/presets card if it is behind another dock tab. Preset clicks select a tile and show a simple mocked overlay in the preview.
 
-Drag the purple playhead handle to seek, or click/drag the ruler. Pointer positions use the timeline’s rendered bounds, so seeking stays aligned after horizontal scrolling, zooming, and docking. The playhead clamps to the 18-second project; media-screen transport follows the selected asset’s duration. Tracks share vertical scrolling, while the ruler and clips share horizontal scrolling.
+Drag the purple playhead handle to seek, or click/drag the ruler. Pointer positions use the timeline’s rendered bounds, so seeking stays aligned after horizontal scrolling, zooming, and docking. The playhead clamps to the 18-second project; media-screen transport follows the selected asset’s duration. Tracks share vertical scrolling, while the ruler and clips share horizontal scrolling. Drag the nine-pixel divider beside the channel controls to change their width (100–420 pixels, while preserving at least 160 pixels for the timeline). Zoom uses the draggable slider or −/+ buttons, from 25% to 800%; it preserves the playhead’s viewport position where scrolling bounds allow. Fit sizes the full 18-second project to the available timeline width.
 
 Header and library search fields use separate native input entities with synchronized text. Reusing one entity in two visible controls creates duplicate accessibility IDs in GPUI. Cards, timeline clips, icon buttons, and the import area expose accessible names.
 
 ## RSX coverage and gaps
 
-**No UI element in these screens required a separate Rust renderer or a compiler change.** Native RSX accepts the GPUI Kit controls, builder methods, event callbacks, iterator children, and canvas used here.
+**Visual markup stays in RSX; no compiler change was required.** Rust adapters implement the docking library’s renderer traits and call RSX functions for presentation. The docking library currently exposes a fixed 100-pixel split minimum rather than per-card minimum settings; configurable card limits would require a native docking API extension. Native RSX accepts the GPUI Kit controls, builder methods, event callbacks, iterator children, and canvas used here.
 
 There are still conveniences worth adding if this should also be expressible entirely in the higher-level HTML-style RSX runtime:
 

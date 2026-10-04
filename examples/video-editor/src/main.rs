@@ -1,6 +1,9 @@
 #[path = "../../support/mod.rs"]
 mod support;
 use rsx_video_editor::state;
+mod dock_skin;
+mod editor;
+mod workspace;
 mod generated {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -50,7 +53,7 @@ fn main() {
                         ..Default::default()
                     },
                     cx,
-                    |window, cx| cx.new(|cx| generated::ui::Editor::new(window, cx)),
+                    generated::ui::entry,
                 )
                 .expect("open FlowCut");
         },

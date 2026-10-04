@@ -371,7 +371,7 @@ impl Render for Editor {
             <div flex items-center gap-3 p-3><div text-xl font-semibold flex-1>Minimal video editor</div>
                 <Button args={"import"} primary label="Import video…" disabled={self.probing||self.exporting} on-click={cx.listener(|_,_,window,cx|{
                     let choice=cx.prompt_for_paths(PathPromptOptions{files:true,directories:false,multiple:false,prompt:Some("Import video".into())});
-                    cx.spawn_in(window,async move|this,cx|{if let Ok(Ok(Some(paths)))=choice.await{if let Some(path)=paths.into_iter().next(){let _=this.update_in(cx,|this,window,cx|this.import(path,window,cx));}}}).detach();
+                    cx.spawn_in(window,async move|this,cx|{if let Ok(Ok(Some(paths)))=choice.await && let Some(path)=paths.into_iter().next(){let _=this.update_in(cx,|this,window,cx|this.import(path,window,cx));}}).detach();
                 })} />
                 <Button args={"export"} label="Export MP4…" disabled={self.media.is_none()||self.exporting||self.probing} on-click={cx.listener(|this,_,window,cx|{
                     let Some(media)=&this.media else{return;};let directory=media.path.parent().unwrap_or(std::path::Path::new("."));

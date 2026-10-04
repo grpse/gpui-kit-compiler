@@ -2,7 +2,7 @@
 use gpui_kit::{prelude::*, *};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, Sizable as _, button::{Button, ButtonVariants as _}};
-use crate::{generated::ui::Editor, state::{Action, Asset, Kind}};
+use crate::{editor::Editor, state::{Action, Asset, Kind}};
 
 pub const BG: u32 = 0x0b1016;
 pub const PANEL: u32 = 0x11171f;
