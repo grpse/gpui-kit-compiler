@@ -6,7 +6,11 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
+
+mod preferences;
+pub use preferences::{Appearance, Preferences};
 
 #[derive(Clone, Debug)]
 pub struct Node {
@@ -37,6 +41,18 @@ impl Node {
             self.logical
         }
     }
+
+    /// Inspector metadata without copying a directory's entire subtree.
+    pub fn summary(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            directory: self.directory,
+            logical: self.logical,
+            allocated: self.allocated,
+            files: self.files,
+            children: vec![],
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Scan {
@@ -44,14 +60,27 @@ pub struct Scan {
     pub warnings: Vec<String>,
     pub skipped: u64,
 }
-struct Scanner {
+#[derive(Clone, Debug, Default)]
+pub struct ScanProgress {
+    pub visited: u64,
+    pub files: u64,
+    pub logical: u64,
+    pub allocated: u64,
+    pub skipped: u64,
+    pub current: PathBuf,
+}
+
+struct Scanner<'a> {
     cancelled: Arc<AtomicBool>,
     seen: HashSet<(u64, u64)>,
     device: u64,
     warnings: Vec<String>,
     skipped: u64,
+    progress: ScanProgress,
+    last_report: Instant,
+    report: &'a mut dyn FnMut(ScanProgress),
 }
-impl Scanner {
+impl Scanner<'_> {
     fn warning(&mut self, text: String) {
         self.skipped += 1;
         if self.warnings.len() < 30 {
@@ -61,6 +90,13 @@ impl Scanner {
     fn visit(&mut self, path: &Path, depth: usize) -> Result<Option<Node>, String> {
         if self.cancelled.load(Ordering::Relaxed) {
             return Err("Scan cancelled".into());
+        }
+        self.progress.visited += 1;
+        self.progress.current = path.to_owned();
+        if self.last_report.elapsed() >= Duration::from_millis(100) {
+            self.progress.skipped = self.skipped;
+            (self.report)(self.progress.clone());
+            self.last_report = Instant::now();
         }
         let metadata = match fs::symlink_metadata(path) {
             Ok(m) => m,
@@ -108,6 +144,9 @@ impl Scanner {
             }
             node.logical = metadata.len();
             node.files = 1;
+            self.progress.files += 1;
+            self.progress.logical = self.progress.logical.saturating_add(node.logical);
+            self.progress.allocated = self.progress.allocated.saturating_add(node.allocated);
         } else if metadata.is_dir() {
             let entries = match fs::read_dir(path) {
                 Ok(entries) => entries,
@@ -118,6 +157,9 @@ impl Scanner {
             };
             let mut paths = Vec::new();
             for entry in entries {
+                if self.cancelled.load(Ordering::Relaxed) {
+                    return Err("Scan cancelled".into());
+                }
                 match entry {
                     Ok(entry) => paths.push(entry.path()),
                     Err(e) => self.warning(format!("{}: {e}", path.display())),
@@ -142,6 +184,14 @@ impl Scanner {
     }
 }
 pub fn scan(path: &Path, cancelled: Arc<AtomicBool>) -> Result<Scan, String> {
+    scan_with_progress(path, cancelled, |_| {})
+}
+
+pub fn scan_with_progress(
+    path: &Path,
+    cancelled: Arc<AtomicBool>,
+    mut report: impl FnMut(ScanProgress),
+) -> Result<Scan, String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_dir() {
         return Err("Choose a directory (not a symbolic link).".into());
@@ -159,10 +209,15 @@ pub fn scan(path: &Path, cancelled: Arc<AtomicBool>) -> Result<Scan, String> {
         seen: HashSet::new(),
         warnings: vec![],
         skipped: 0,
+        progress: ScanProgress::default(),
+        last_report: Instant::now(),
+        report: &mut report,
     };
     let root = scanner
         .visit(path, 0)?
         .ok_or("Directory could not be scanned")?;
+    scanner.progress.skipped = scanner.skipped;
+    (scanner.report)(scanner.progress.clone());
     Ok(Scan {
         root,
         warnings: scanner.warnings,
@@ -275,9 +330,18 @@ mod tests {
             std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
             fs::hard_link(root.join("first"), root.join("hardlink")).unwrap();
         }
-        let result = scan(&root, Arc::new(AtomicBool::new(false))).unwrap();
+        let mut updates = vec![];
+        let result = scan_with_progress(&root, Arc::new(AtomicBool::new(false)), |progress| {
+            updates.push(progress)
+        })
+        .unwrap();
         assert_eq!(result.root.logical, 50);
         assert_eq!(result.root.files, 2);
+        let progress = updates.last().unwrap();
+        assert_eq!(progress.logical, result.root.logical);
+        assert_eq!(progress.allocated, result.root.allocated);
+        assert_eq!(progress.files, result.root.files);
+        assert_eq!(progress.skipped, result.skipped);
         #[cfg(unix)]
         assert_eq!(result.skipped, 1);
         let rects = treemap(&result.root.children, false);

@@ -1,4 +1,5 @@
 use gpui_kit::*;
+use gpui_rsc::runtime::{Lifecycle, LifecycleEvent, LifecycleHandler};
 
 #[allow(dead_code)]
 pub fn bytes(size: u64) -> String {
@@ -28,17 +29,30 @@ pub fn launch<V: Render>(
     title: &'static str,
     build: impl FnOnce(&mut Window, &mut App) -> Entity<V> + 'static,
 ) {
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
+    launch_with_lifecycle(title, handle_lifecycle, build);
+}
+
+/// Customize this function or pass your own handler to `launch_with_lifecycle`.
+fn handle_lifecycle(event: LifecycleEvent) {
+    if let LifecycleEvent::UnexpectedQuit { reason } = event {
+        eprintln!("application quit unexpectedly: {reason}");
+    }
+}
+
+pub fn launch_with_lifecycle<V: Render>(
+    title: &'static str,
+    handler: LifecycleHandler,
+    build: impl FnOnce(&mut Window, &mut App) -> Entity<V> + 'static,
+) {
+    // Native RSX is checked by Rust; validation must not initialize AppKit.
+    if std::env::args().nth(1).as_deref() == Some("--validate") {
+        return;
+    }
+    Lifecycle::new(handler).run(
+        gpui_kit::application().with_assets(gpui_kit::assets::Assets),
+        move |cx, lifecycle| {
             gpui_kit::init(cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-            gpui_kit::open_window(
+            lifecycle.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                         None,
@@ -56,5 +70,6 @@ pub fn launch<V: Render>(
                 build,
             )
             .expect("open example window");
-        });
+        },
+    );
 }

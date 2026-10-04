@@ -1,3 +1,5 @@
+pub mod state;
+
 use std::{
     ffi::OsString,
     fs,

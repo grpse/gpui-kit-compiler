@@ -2,7 +2,7 @@ use std::{
     env, fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, ExitStatus},
     thread,
     time::Duration,
 };
@@ -62,8 +62,8 @@ fn run() -> Result<(), String> {
         "run" => {
             let binary = build(&project, &cargo_args)?;
             let mut child = launch(&root, &binary)?;
-            child.wait().map_err(|error| error.to_string())?;
-            Ok(())
+            let status = child.wait().map_err(|error| error.to_string())?;
+            check_application_exit(status)
         }
         "dev" => {
             let binary = build(&project, &cargo_args)?;
@@ -72,6 +72,9 @@ fn run() -> Result<(), String> {
             println!("Watching .rsx, Rust, and Cargo sources. Press Ctrl+C to stop.");
             loop {
                 thread::sleep(Duration::from_millis(500));
+                if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                    return check_application_exit(status);
+                }
                 let current = source_hash(&root, &project.root);
                 if current != previous {
                     match build(&project, &cargo_args) {
@@ -185,7 +188,7 @@ fn build(project: &RustProject, cargo_args: &[String]) -> Result<PathBuf, String
     if status.success() {
         Ok(binary)
     } else {
-        Err(format!("component binding validation failed: {status}"))
+        Err(validation_failure(status))
     }
 }
 
@@ -264,6 +267,27 @@ fn launch(root: &Path, binary: &Path) -> Result<Child, String> {
         .map_err(|error| format!("could not start {}: {error}", binary.display()))
 }
 
+fn check_application_exit(status: ExitStatus) -> Result<(), String> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("application quit unexpectedly: {status}"))
+    }
+}
+
+fn validation_failure(status: ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if status.signal().is_some() {
+            return format!(
+                "validation process quit unexpectedly: {status}; --validate must finish without opening the application UI"
+            );
+        }
+    }
+    format!("component binding validation failed: {status}")
+}
+
 fn cargo_command() -> Command {
     // `cargo run` supplies its executable so nested builds use the same toolchain.
     Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
@@ -300,4 +324,31 @@ fn source_hash(compiler_root: &Path, project_root: &Path) -> u64 {
     visit(&compiler_root.join("src"), &mut hasher);
     visit(project_root, &mut hasher);
     hasher.finish()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn normal_app_exit_succeeds_but_errors_and_native_aborts_fail() {
+        assert!(check_application_exit(ExitStatus::from_raw(0)).is_ok());
+        let error = check_application_exit(ExitStatus::from_raw(17 << 8)).unwrap_err();
+        assert!(error.contains("application quit unexpectedly"));
+        assert!(error.contains("17"));
+        let abort = check_application_exit(ExitStatus::from_raw(6)).unwrap_err();
+        assert!(abort.contains("application quit unexpectedly"));
+        assert!(abort.contains("SIGABRT"));
+    }
+
+    #[test]
+    fn validation_distinguishes_native_crash_from_invalid_bindings() {
+        let abort = validation_failure(ExitStatus::from_raw(6));
+        assert!(abort.contains("validation process quit unexpectedly"));
+        assert!(abort.contains("SIGABRT"));
+        assert!(!abort.contains("component binding validation failed"));
+        let bindings = validation_failure(ExitStatus::from_raw(1 << 8));
+        assert!(bindings.contains("component binding validation failed"));
+    }
 }

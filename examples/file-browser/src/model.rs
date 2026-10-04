@@ -5,6 +5,12 @@ use std::{
     time::SystemTime,
 };
 
+mod search;
+pub use rsx_disk_explorer::{
+    Appearance, Node, Preferences, Scan, ScanProgress, largest_files, scan_with_progress,
+};
+pub use search::{SearchUpdate, fuzzy_score, search};
+
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub path: PathBuf,
@@ -12,6 +18,7 @@ pub struct Entry {
     pub is_dir: bool,
     pub is_symlink: bool,
     pub bytes: u64,
+    pub allocated: u64,
     pub modified: Option<SystemTime>,
 }
 
@@ -42,6 +49,7 @@ pub fn read_directory(path: &Path) -> Result<(Vec<Entry>, usize), String> {
             is_dir,
             is_symlink,
             bytes: metadata.len(),
+            allocated: allocated_bytes(&metadata),
             modified: metadata.modified().ok(),
         });
     }
@@ -51,6 +59,47 @@ pub fn read_directory(path: &Path) -> Result<(Vec<Entry>, usize), String> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok((entries, unreadable))
+}
+
+pub fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.blocks().saturating_mul(512)
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.len()
+    }
+}
+
+impl Entry {
+    pub fn kind(&self) -> String {
+        if self.is_symlink {
+            return "Alias".into();
+        }
+        if self.is_dir {
+            return "Folder".into();
+        }
+        match self
+            .path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
+            "pdf" => "PDF document".into(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => "Image".into(),
+            "mp4" | "mov" | "mkv" => "Video".into(),
+            "mp3" | "wav" | "flac" => "Audio".into(),
+            "zip" | "gz" | "tar" | "7z" => "Archive".into(),
+            "rs" | "js" | "ts" | "tsx" | "py" | "rsx" => "Source code".into(),
+            "txt" | "md" | "log" => "Text document".into(),
+            "" => "File".into(),
+            extension => format!("{} file", extension.to_uppercase()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

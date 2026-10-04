@@ -28,7 +28,7 @@ Three native RSX apps demonstrate interactive tabs, resizable panes, browsing, a
 
 | Example | Features |
 | --- | --- |
-| [File browser](examples/file-browser/README.md) | Folder tabs, navigation history, filtering, virtualized rows, text/image previews, and file details |
+| [File Explorer](examples/file-browser/README.md) | Finder-style browsing, background fuzzy search, on-demand storage analysis, previews, and system light/dark appearance |
 | [Disk space explorer](examples/disk-explorer/README.md) | Cancellable scans, a drill-down treemap, logical/allocated byte totals, largest files, and scan reports |
 | [Video editor](examples/video-editor/README.md) | FFprobe import, frame preview, trimming, rotation, resizing, muting, and cancellable FFmpeg MP4 export |
 
@@ -76,7 +76,7 @@ pub fn GrindSlider() -> gpui::AnyElement {
 
 The compiler keeps the signal alive for the component definition. A control bound with `value={grind}` updates it, and `on-click={grind.set(6)}` runs a Rust action that can update it; both changes redraw the declaring view and any child view that receives or renders `grind`. The same signal can back multiple controls or child components; give each control a unique `id` so updates stay synchronized across them. A signal-only root can omit a calculation callback. Use component parameters when a child should receive a value from its parent without owning that state.
 
-On Linux, `runtime::run_with_config` initializes and runs GPUI on a dedicated `rsc-ui` thread while the calling main thread runs the state dispatcher. UI event setters, `on_change`, and calculations execute serially on that dispatcher. `Engine::dispatch(move || { ... })` also queues application work there. The channel blocks when idle and wakes on delivery, so no polling or separate semaphore is needed. Spawn a background worker inside a callback for long independent jobs, and publish results with `Engine::set` or signals. UI exit (including an initialization panic) stops the dispatcher and joins the UI thread. Other platforms keep native UI on the calling thread and use a state worker. `Engine::start` continues to provide a standalone worker for tests and embedded usage.
+On Linux, `runtime::run_with_config` initializes and runs GPUI on a dedicated `rsc-ui` thread while the calling main thread runs the state dispatcher. UI event setters, `on_change`, and calculations execute serially on that dispatcher. `Engine::dispatch(move || { ... })` also queues application work there. The channel blocks when idle and wakes on delivery, so no polling or separate semaphore is needed. Spawn a background worker inside a callback for long independent jobs, and publish results with `Engine::set` or signals. Other platforms keep native UI on the calling thread and use a state worker. Closing the last window quits the application. The quit handler requests dispatcher shutdown and awaits its completion within GPUI's shutdown timeout; work already queued before shutdown runs in order, and snapshot subscriptions disconnect when the dispatcher exits. UI updates await async channels without blocking background threads. If the UI event loop returns or unwinds, a cleanup guard stops the dispatcher and joins the owned thread. `Engine::start` continues to provide a standalone worker for tests and embedded usage.
 
 For a calculated app, declare `pub fn calculate(values: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot` in the `.rsx` file. The compiler wires it into the root component automatically, along with optional `pub fn on_change(values: &mut HashMap<String, Value>, changed_key: &str, value: &Value)` and `pub fn output_format(name: &str, value: &Value) -> String` functions. Simple child properties such as `<CoffeeProfile acidity={acidity} />` are inferred as readable calculated values; local signals with those names are passed through directly. This removes the need for a handwritten `definition()` and binding list.
 
@@ -301,6 +301,36 @@ fn main() {
 ```
 
 The generated module name comes from each `.rsx` filename (`app.rsx` becomes `generated::app`), and the component function is the Rust entry point argument. `runtime::run` uses the default 1240×870 window; `run_with_config` accepts the full `StartupConfig`, including window state, decorations, and interaction options.
+
+### Application lifecycle
+
+Provide one function to receive lifecycle notifications:
+
+```rust
+use gpui_rsc::runtime::{LifecycleEvent, StartupConfig};
+
+fn handle_lifecycle(event: LifecycleEvent) {
+    match event {
+        LifecycleEvent::WillOpen => println!("Opening window"),
+        LifecycleEvent::WillClose { window_id } => println!("Closing {window_id:?}"),
+        LifecycleEvent::WillQuit => println!("Preparing to quit"),
+        LifecycleEvent::UnexpectedQuit { reason } => eprintln!("Unexpected quit: {reason}"),
+        _ => {}
+    }
+}
+
+let startup = StartupConfig {
+    on_lifecycle: Some(handle_lifecycle),
+    ..StartupConfig::default()
+};
+// runtime::run_with_config(generated::app::App(), startup);
+```
+
+Events include `WillStart`/`DidStart`, `WillOpen`/`DidOpen`/`OpenFailed`, `WillClose`/`DidClose`, `WillQuit`/`DidQuit`, window activation/deactivation, reopen, URL opening, restart, and system sleep/wake. Window events include their `window_id` once available. Handlers are synchronous notifications: keep them short; they do not veto closing or quitting. `DidQuit` means GPUI has released the windows and the runtime dispatcher has completed cleanup, within GPUI's quit timeout. The OS process may still be finishing termination. A handler panic is logged and isolated from native callbacks.
+
+Native GPUI apps can use `Lifecycle::new(handle_lifecycle).run(application, |cx, lifecycle| { ... })` and `lifecycle.open_window(options, cx, build)`. The shared native example launcher exposes `support::launch_with_lifecycle(title, handle_lifecycle, build)`. For programmatic closes, use `lifecycle.close_window(window, cx)`. On macOS, closing the last window requests application quit while keeping the native view alive until termination, avoiding a Touch Bar observer teardown race. Custom native close-request handlers can call `lifecycle.window_will_close(window.window_handle().window_id())` after allowing a close. If a window is removed without either hook, its `WillClose` is synthesized when removal is observed, immediately before `DidClose`.
+
+`UnexpectedQuit` reports Rust panics at the runtime's guarded launch, event-loop, and dispatcher boundaries, and event-loop return without a quit request; panics retain their failure status. Native exceptions that abort, `SIGKILL`, and `panic=abort` cannot execute an in-process lifecycle callback. The `gpui-rsc run` and `dev` launchers detect unsuccessful child exits, report “application quit unexpectedly” with the exit code or signal, and exit unsuccessfully. `dev` also stops after the app quits normally. Native example `--validate` returns before creating the UI; runtime apps still validate component bindings without opening a window.
 
 ## Library layout
 

@@ -78,7 +78,7 @@ impl From<bool> for Value {
 
 struct SignalState {
     value: Mutex<Value>,
-    subscribers: Mutex<Vec<Sender<()>>>,
+    subscribers: Mutex<Vec<async_channel::Sender<()>>>,
     engines: Mutex<HashMap<(usize, String), Engine>>,
 }
 
@@ -143,7 +143,7 @@ impl Signal {
             .subscribers
             .lock()
             .expect("signal subscribers lock poisoned")
-            .retain(|subscriber| subscriber.send(()).is_ok());
+            .retain(|subscriber| subscriber.try_send(()).is_ok());
     }
 
     fn sync_from_engine(signal: &Weak<SignalState>, value: Value) {
@@ -165,14 +165,14 @@ impl Signal {
             .insert((identity, key), engine);
     }
 
-    pub(crate) fn subscribe(&self) -> Arc<Mutex<Receiver<()>>> {
-        let (sender, receiver) = mpsc::channel();
+    pub(crate) fn subscribe(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::unbounded();
         self.state
             .subscribers
             .lock()
             .expect("signal subscribers lock poisoned")
             .push(sender);
-        Arc::new(Mutex::new(receiver))
+        receiver
     }
 }
 
@@ -336,7 +336,7 @@ impl Binding {
             engine.dispatch(move || setter(&target, value));
         }
     }
-    pub(crate) fn subscribe_signal(&self) -> Option<Arc<Mutex<Receiver<()>>>> {
+    pub(crate) fn subscribe_signal(&self) -> Option<async_channel::Receiver<()>> {
         self.signal.as_ref().map(Signal::subscribe)
     }
 }
@@ -406,12 +406,38 @@ enum Message {
     Shutdown,
 }
 
+#[derive(Default)]
+struct Subscribers {
+    blocking: Vec<Sender<Snapshot>>,
+    asynchronous: Vec<async_channel::Sender<Snapshot>>,
+    closed: bool,
+}
+
+// Disconnect listeners and notify quit handlers on both normal exit and unwinding.
+struct DispatcherExit {
+    subscribers: Arc<Mutex<Subscribers>>,
+    _stopped: async_channel::Sender<()>,
+}
+
+impl Drop for DispatcherExit {
+    fn drop(&mut self) {
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .expect("snapshot subscribers lock poisoned");
+        subscribers.closed = true;
+        subscribers.blocking.clear();
+        subscribers.asynchronous.clear();
+    }
+}
+
 #[derive(Clone)]
 pub struct Engine {
     sender: Sender<Message>,
     shared: Arc<Mutex<Snapshot>>,
-    subscribers: Arc<Mutex<Vec<Sender<Snapshot>>>>,
+    subscribers: Arc<Mutex<Subscribers>>,
     signals: Arc<Mutex<HashMap<String, Weak<SignalState>>>>,
+    stopped: async_channel::Receiver<()>,
 }
 
 impl Engine {
@@ -436,12 +462,18 @@ impl Engine {
     ) -> (Self, impl FnOnce() + Send + 'static) {
         let shared = Arc::new(Mutex::new(calculate(&defaults, 0)));
         let (sender, receiver) = mpsc::channel();
-        let subscribers = Arc::new(Mutex::new(Vec::<Sender<Snapshot>>::new()));
+        let subscribers = Arc::new(Mutex::new(Subscribers::default()));
+        let (stopped_sender, stopped) = async_channel::bounded(1);
         let signals = Arc::new(Mutex::new(HashMap::<String, Weak<SignalState>>::new()));
         let shared_worker = Arc::clone(&shared);
         let subscribers_worker = Arc::clone(&subscribers);
         let signals_worker = Arc::clone(&signals);
+        let exit = DispatcherExit {
+            subscribers: Arc::clone(&subscribers),
+            _stopped: stopped_sender,
+        };
         let run = move || {
+            let _exit = exit;
             let mut values = defaults.clone();
             let mut reset_epoch = 0;
             while let Ok(message) = receiver.recv() {
@@ -483,10 +515,15 @@ impl Engine {
                 }
                 let next = calculate(&values, reset_epoch);
                 *shared_worker.lock().expect("snapshot lock poisoned") = next.clone();
-                subscribers_worker
+                let mut subscribers = subscribers_worker
                     .lock()
-                    .expect("snapshot subscribers lock poisoned")
+                    .expect("snapshot subscribers lock poisoned");
+                subscribers
+                    .blocking
                     .retain(|subscriber| subscriber.send(next.clone()).is_ok());
+                subscribers
+                    .asynchronous
+                    .retain(|subscriber| subscriber.try_send(next.clone()).is_ok());
             }
         };
         (
@@ -495,6 +532,7 @@ impl Engine {
                 shared,
                 subscribers,
                 signals,
+                stopped,
             },
             run,
         )
@@ -508,6 +546,10 @@ impl Engine {
 
     pub(crate) fn shutdown(&self) {
         let _ = self.sender.send(Message::Shutdown);
+    }
+
+    pub(crate) async fn wait_for_shutdown(&self) {
+        let _ = self.stopped.recv().await;
     }
 
     fn bind_signal(&self, key: String, signal: &Signal) {
@@ -527,11 +569,25 @@ impl Engine {
     }
     pub fn subscribe(&self) -> Arc<Mutex<Receiver<Snapshot>>> {
         let (sender, receiver) = mpsc::channel();
-        self.subscribers
+        let mut subscribers = self
+            .subscribers
             .lock()
-            .expect("snapshot subscribers lock poisoned")
-            .push(sender);
+            .expect("snapshot subscribers lock poisoned");
+        if !subscribers.closed {
+            subscribers.blocking.push(sender);
+        }
         Arc::new(Mutex::new(receiver))
+    }
+    pub(crate) fn subscribe_async(&self) -> async_channel::Receiver<Snapshot> {
+        let (sender, receiver) = async_channel::unbounded();
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .expect("snapshot subscribers lock poisoned");
+        if !subscribers.closed {
+            subscribers.asynchronous.push(sender);
+        }
+        receiver
     }
     pub fn snapshot(&self) -> Snapshot {
         self.shared.lock().expect("snapshot lock poisoned").clone()
@@ -541,6 +597,104 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepare_engine() -> (Engine, impl FnOnce() + Send + 'static) {
+        Engine::prepare(
+            HashMap::new(),
+            |values, reset_epoch| Snapshot {
+                values: values.clone(),
+                reset_epoch,
+            },
+            None,
+        )
+    }
+
+    fn assert_stopped(engine: &Engine) {
+        use std::future::Future;
+        let mut stopped = std::pin::pin!(engine.wait_for_shutdown());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(stopped.as_mut().poll(&mut context).is_ready());
+    }
+
+    #[test]
+    fn shutdown_delivers_queued_snapshots_and_disconnects_live_subscribers() {
+        let (engine, run) = prepare_engine();
+        let live_handle = engine.clone();
+        let blocking = engine.subscribe();
+        let asynchronous = engine.subscribe_async();
+        engine.set("result", Value::from("done"));
+        engine.shutdown();
+        engine.shutdown();
+        engine.set("result", Value::from("too late"));
+        run();
+
+        let blocking = blocking.lock().unwrap();
+        assert_eq!(
+            blocking.try_recv().unwrap().get("result"),
+            Some(&Value::from("done"))
+        );
+        assert_eq!(
+            blocking.try_recv().unwrap_err(),
+            mpsc::TryRecvError::Disconnected
+        );
+        assert_eq!(
+            asynchronous.try_recv().unwrap().get("result"),
+            Some(&Value::from("done"))
+        );
+        assert_eq!(
+            asynchronous.try_recv().unwrap_err(),
+            async_channel::TryRecvError::Closed
+        );
+        assert_eq!(
+            live_handle.snapshot().get("result"),
+            Some(&Value::from("done"))
+        );
+        assert_stopped(&live_handle);
+        assert_stopped(&engine);
+        assert_eq!(
+            engine.subscribe().lock().unwrap().try_recv().unwrap_err(),
+            mpsc::TryRecvError::Disconnected
+        );
+        assert_eq!(
+            engine.subscribe_async().try_recv().unwrap_err(),
+            async_channel::TryRecvError::Closed
+        );
+    }
+
+    #[test]
+    fn dispatcher_panic_disconnects_subscribers_and_completes_shutdown() {
+        let (engine, run) = prepare_engine();
+        let updates = engine.subscribe_async();
+        engine.dispatch(|| panic!("callback failed"));
+        assert!(thread::spawn(run).join().is_err());
+        assert_eq!(
+            updates.try_recv().unwrap_err(),
+            async_channel::TryRecvError::Closed
+        );
+        assert_stopped(&engine);
+    }
+
+    #[test]
+    fn dropping_an_unstarted_dispatcher_completes_shutdown() {
+        let (engine, run) = prepare_engine();
+        let updates = engine.subscribe_async();
+        drop(run);
+        assert_eq!(
+            updates.try_recv().unwrap_err(),
+            async_channel::TryRecvError::Closed
+        );
+        assert_stopped(&engine);
+    }
+
+    #[test]
+    fn signal_notifications_are_async_and_disconnect_when_signal_drops() {
+        let signal = Signal::new(1);
+        let updates = signal.subscribe();
+        signal.set(2);
+        assert_eq!(updates.try_recv(), Ok(()));
+        drop(signal);
+        assert_eq!(updates.try_recv(), Err(async_channel::TryRecvError::Closed));
+    }
 
     #[test]
     fn event_binding_dispatches_to_the_owner_thread_and_publishes_state() {

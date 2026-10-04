@@ -5749,12 +5749,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsx-disk-explorer"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+ "gpui-rsc",
+]
+
+[[package]]
 name = "rsx-file-browser"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "chrono",
  "gpui-kit",
  "gpui-rsc",
+ "rsx-disk-explorer",
 ]
 
 [[package]]

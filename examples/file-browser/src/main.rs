@@ -8,7 +8,7 @@ mod generated {
     ));
 }
 fn main() {
-    support::launch("File Browser", |window, cx| {
+    support::launch("File Explorer", |window, cx| {
         cx.new(|cx| generated::ui::Browser::new(window, cx))
     });
 }

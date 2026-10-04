@@ -6,7 +6,10 @@ use std::time::Instant;
 
 use crate::runtime::binding::{self, Control, Element, InlineStyle, Node, Page};
 use crate::runtime::video::{VideoFit, VideoOptions, VideoPlayer};
-use crate::runtime::{ComponentProps, Definition, Engine, OutputFormatter, Snapshot, Value};
+use crate::runtime::{
+    ComponentProps, Definition, Engine, Lifecycle, LifecycleHandler, OutputFormatter, Snapshot,
+    Value,
+};
 use gpui_kit::component::{
     Disableable, IndexPath, TitleBar,
     button::{Button, ButtonVariants},
@@ -37,6 +40,8 @@ pub enum StartupDecorations {
 
 #[derive(Clone, Copy, Debug)]
 pub struct StartupConfig {
+    /// Receive application and window lifecycle notifications.
+    pub on_lifecycle: Option<LifecycleHandler>,
     pub width: f32,
     pub height: f32,
     pub min_width: Option<f32>,
@@ -53,6 +58,7 @@ pub struct StartupConfig {
 impl Default for StartupConfig {
     fn default() -> Self {
         Self {
+            on_lifecycle: None,
             width: 1240.0,
             height: 870.0,
             min_width: None,
@@ -72,6 +78,7 @@ pub struct HtmlView {
     title: String,
     page: Page,
     engine: Engine,
+    lifecycle: Lifecycle,
     snapshot: Snapshot,
     props: ComponentProps,
     embedded: bool,
@@ -155,22 +162,24 @@ impl HtmlView {
     fn new_component(
         page: Page,
         engine: Engine,
+        lifecycle: Lifecycle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_engine(page, String::new(), engine, true, window, cx)
+        Self::new_with_engine(page, String::new(), engine, lifecycle, true, window, cx)
     }
 
     fn new_with_engine(
         page: Page,
         title: String,
         engine: Engine,
+        lifecycle: Lifecycle,
         embedded: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         page.bind_signals(&engine);
-        let updates = (!page.inputs.is_empty()).then(|| engine.subscribe());
+        let updates = (!page.inputs.is_empty()).then(|| engine.subscribe_async());
         let signal_updates = page
             .inputs
             .iter()
@@ -188,6 +197,7 @@ impl HtmlView {
             title,
             page,
             engine,
+            lifecycle,
             snapshot,
             props,
             embedded,
@@ -217,24 +227,8 @@ impl HtmlView {
         }
         if let Some(updates) = updates {
             cx.spawn_in(window, async move |this, cx| {
-                loop {
-                    let receiver = updates.clone();
-                    let next = cx
-                        .background_spawn(async move {
-                            receiver
-                                .lock()
-                                .expect("update receiver lock poisoned")
-                                .recv()
-                        })
-                        .await;
-                    let Ok(mut next) = next else {
-                        break;
-                    };
-                    while let Ok(latest) = updates
-                        .lock()
-                        .expect("update receiver lock poisoned")
-                        .try_recv()
-                    {
+                while let Ok(mut next) = updates.recv().await {
+                    while let Ok(latest) = updates.try_recv() {
                         next = latest;
                     }
                     if this
@@ -249,19 +243,7 @@ impl HtmlView {
         }
         for updates in signal_updates {
             cx.spawn_in(window, async move |this, cx| {
-                loop {
-                    let receiver = updates.clone();
-                    let changed = cx
-                        .background_spawn(async move {
-                            receiver
-                                .lock()
-                                .expect("signal update receiver lock poisoned")
-                                .recv()
-                        })
-                        .await;
-                    if changed.is_err() {
-                        break;
-                    }
+                while updates.recv().await.is_ok() {
                     if this
                         .update_in(cx, |view, window, cx| {
                             let next = view.engine.snapshot();
@@ -565,7 +547,8 @@ impl HtmlView {
             child.clone()
         } else {
             let engine = self.engine.clone();
-            let child = cx.new(|cx| Self::new_component(*page, engine, window, cx));
+            let lifecycle = self.lifecycle.clone();
+            let child = cx.new(|cx| Self::new_component(*page, engine, lifecycle, window, cx));
             self.component_views.insert(id, child.clone());
             child
         };
@@ -1025,6 +1008,7 @@ impl Render for HtmlView {
         if self.embedded {
             return element_container().w_full().child(root);
         }
+        let lifecycle = self.lifecycle.clone();
         div()
             .relative()
             .flex()
@@ -1032,7 +1016,15 @@ impl Render for HtmlView {
             .size_full()
             .when(
                 matches!(window.window_decorations(), Decorations::Client { .. }),
-                |view| view.child(TitleBar::new().child(self.title.clone())),
+                |view| {
+                    view.child(
+                        TitleBar::new()
+                            .on_close_window(move |_, window, cx| {
+                                lifecycle.close_window(window, cx)
+                            })
+                            .child(self.title.clone()),
+                    )
+                },
             )
             .child(
                 div()
@@ -1084,13 +1076,34 @@ fn configure_application(app: Application) -> Application {
         .with_assets(assets::Assets)
 }
 
+struct StopDispatcher {
+    engine: Engine,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for StopDispatcher {
+    fn drop(&mut self) {
+        self.engine.shutdown();
+        if let Some(worker) = self.worker.take()
+            && let Err(panic) = worker.join()
+            && !std::thread::panicking()
+        {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 pub fn run_with_config(definition: Definition, startup: StartupConfig) {
+    let lifecycle = startup.on_lifecycle.map(Lifecycle::new).unwrap_or_default();
+    lifecycle.guard(|| run_application(definition, startup, lifecycle.clone()));
+}
+
+fn run_application(definition: Definition, startup: StartupConfig, lifecycle: Lifecycle) {
     let calculate = definition.calculate.unwrap_or(identity_snapshot);
     let on_change = definition.on_change;
     let title = definition.title.to_owned();
     let page = binding::compile(&definition).unwrap_or_else(|error| {
-        eprintln!("component binding error: {error}");
-        std::process::exit(1);
+        panic!("component binding error: {error}");
     });
     if std::env::args().nth(1).as_deref() == Some("--validate") {
         return;
@@ -1099,72 +1112,135 @@ pub fn run_with_config(definition: Definition, startup: StartupConfig) {
     {
         let (engine, dispatch) = Engine::prepare(page.defaults.clone(), calculate, on_change);
         let shutdown = engine.clone();
+        let ui_lifecycle = lifecycle.clone();
         let ui = std::thread::Builder::new()
             .name("rsc-ui".into())
             .spawn(move || {
                 // Also wake the dispatcher if UI initialization panics.
-                struct StopDispatcher(Engine);
-                impl Drop for StopDispatcher {
-                    fn drop(&mut self) {
-                        self.0.shutdown();
-                    }
-                }
-                let _stop = StopDispatcher(shutdown);
-                run_ui(page, title, engine, startup);
+                let _stop = StopDispatcher {
+                    engine: shutdown,
+                    worker: None,
+                };
+                run_ui(page, title, engine, startup, ui_lifecycle);
             })
             .expect("failed to start UI thread");
-        dispatch();
+        lifecycle.guard(dispatch);
         if let Err(panic) = ui.join() {
             std::panic::resume_unwind(panic);
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let engine = Engine::start(page.defaults.clone(), calculate, on_change);
-        run_ui(page, title, engine, startup);
+        let (engine, dispatch) = Engine::prepare(page.defaults.clone(), calculate, on_change);
+        let worker_lifecycle = lifecycle.clone();
+        let worker = std::thread::Builder::new()
+            .name("rsc-calculation-worker".into())
+            .spawn(move || worker_lifecycle.guard(dispatch))
+            .expect("failed to start calculation worker");
+        let _stop = StopDispatcher {
+            engine: engine.clone(),
+            worker: Some(worker),
+        };
+        run_ui(page, title, engine, startup, lifecycle);
     }
 }
 
-fn run_ui(page: Page, title: String, engine: Engine, startup: StartupConfig) {
-    configure_application(application()).run(move |cx| {
-        init(cx);
-        let restore_bounds =
-            Bounds::centered(None, size(px(startup.width), px(startup.height)), cx);
-        let window_bounds = match startup.state {
-            StartupWindowState::Windowed => WindowBounds::Windowed(restore_bounds),
-            StartupWindowState::Maximized => WindowBounds::Maximized(restore_bounds),
-            StartupWindowState::Fullscreen => WindowBounds::Fullscreen(restore_bounds),
+fn run_ui(page: Page, title: String, engine: Engine, startup: StartupConfig, lifecycle: Lifecycle) {
+    lifecycle.run_with_engine(
+        configure_application(application()),
+        Some(engine.clone()),
+        move |cx, lifecycle| {
+            init(cx);
+            let restore_bounds =
+                Bounds::centered(None, size(px(startup.width), px(startup.height)), cx);
+            let window_bounds = match startup.state {
+                StartupWindowState::Windowed => WindowBounds::Windowed(restore_bounds),
+                StartupWindowState::Maximized => WindowBounds::Maximized(restore_bounds),
+                StartupWindowState::Fullscreen => WindowBounds::Fullscreen(restore_bounds),
+            };
+            let decorations = match startup.decorations {
+                StartupDecorations::Server => WindowDecorations::Server,
+                StartupDecorations::Client => WindowDecorations::Client,
+            };
+            lifecycle
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(window_bounds),
+                        window_min_size: startup
+                            .min_width
+                            .zip(startup.min_height)
+                            .map(|(width, height)| size(px(width), px(height))),
+                        window_decorations: Some(decorations),
+                        is_resizable: startup.resizable,
+                        is_minimizable: startup.minimizable,
+                        is_movable: startup.movable,
+                        focus: startup.focus,
+                        show: startup.show,
+                        titlebar: Some(TitlebarOptions {
+                            title: Some(title.clone().into()),
+                            ..TitleBar::title_bar_options()
+                        }),
+                        ..TitleBar::window_options()
+                    },
+                    cx,
+                    |window, cx| {
+                        cx.new(|cx| {
+                            HtmlView::new_with_engine(
+                                page,
+                                title,
+                                engine,
+                                lifecycle.clone(),
+                                false,
+                                window,
+                                cx,
+                            )
+                        })
+                    },
+                )
+                .expect("failed to open GPUI window");
+        },
+    );
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    fn worker() -> (Engine, StopDispatcher, std::sync::mpsc::Receiver<()>) {
+        let (engine, run) = Engine::prepare(HashMap::new(), identity_snapshot, None);
+        let (finished, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run();
+            finished.send(()).unwrap();
+        });
+        let guard = StopDispatcher {
+            engine: engine.clone(),
+            worker: Some(worker),
         };
-        let decorations = match startup.decorations {
-            StartupDecorations::Server => WindowDecorations::Server,
-            StartupDecorations::Client => WindowDecorations::Client,
-        };
-        open_window(
-            WindowOptions {
-                window_bounds: Some(window_bounds),
-                window_min_size: startup
-                    .min_width
-                    .zip(startup.min_height)
-                    .map(|(width, height)| size(px(width), px(height))),
-                window_decorations: Some(decorations),
-                is_resizable: startup.resizable,
-                is_minimizable: startup.minimizable,
-                is_movable: startup.movable,
-                focus: startup.focus,
-                show: startup.show,
-                titlebar: Some(TitlebarOptions {
-                    title: Some(title.clone().into()),
-                    ..TitleBar::title_bar_options()
-                }),
-                ..TitleBar::window_options()
-            },
-            cx,
-            move |window, cx| {
-                cx.new(|cx| HtmlView::new_with_engine(page, title, engine, false, window, cx))
-            },
-        )
-        .expect("failed to open GPUI window");
-    });
+        (engine, guard, completion)
+    }
+
+    #[::core::prelude::v1::test]
+    fn cleanup_stops_and_joins_worker_with_live_engine_handles() {
+        let (engine, guard, completion) = worker();
+        let updates = engine.subscribe_async();
+        drop(guard);
+        assert_eq!(completion.try_recv(), Ok(()));
+        assert!(updates.is_closed());
+    }
+
+    #[::core::prelude::v1::test]
+    fn cleanup_stops_and_joins_worker_when_ui_panics() {
+        let (engine, guard, completion) = worker();
+        let updates = engine.subscribe_async();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = guard;
+            panic!("UI initialization failed");
+        }));
+        assert!(panic.is_err());
+        assert_eq!(completion.try_recv(), Ok(()));
+        assert!(updates.is_closed());
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

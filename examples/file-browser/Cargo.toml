@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 gpui-kit = "=0.7.0"
 chrono = "0.4"
+async-channel = "2"
+rsx-disk-explorer = { path = "../disk-explorer" }
 gpui-rsc = { path = "../..", default-features = false, features = ["runtime"] }
 
 [lib]
