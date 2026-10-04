@@ -203,8 +203,27 @@ fn lower_chain(
     chain: Vec<(String, Vec<Expr>)>,
     translator: &mut Translator,
 ) -> Result<Expr, String> {
+    let position = chain
+        .iter()
+        .rev()
+        .find_map(|(name, _)| match name.as_str() {
+            "position_static" | "position_relative" | "position_absolute" => Some(name.as_str()),
+            _ => None,
+        });
+    let is_static = position == Some("position_static");
+    let is_absolute = position == Some("position_absolute");
     let mut statements = Vec::new();
     for (name, mut args) in chain {
+        if matches!(name.as_str(), "top" | "right" | "bottom" | "left") {
+            if is_static {
+                continue;
+            }
+            if !is_absolute {
+                return Err(format!(
+                    "style offset {name} requires position: \"absolute\"; normal-flow elements remain inside their parent"
+                ));
+            }
+        }
         for arg in &mut args {
             translator.visit_expr_mut(arg);
         }
@@ -218,6 +237,8 @@ fn lower_chain(
             ("flex_wrap", [v]) => {
                 quote!(if #v { __style.flex_wrap() } else { __style.flex_nowrap() })
             }
+            ("flex_shrink", [v]) => quote!(__style.flex_shrink((#v) as f32)),
+            ("flex_basis", [v]) => quote!(__style.flex_basis(#v)),
             ("flex_grow", [v]) => quote!(if #v { __style.flex_1() } else { __style.flex_none() }),
             ("gap", [v]) => quote!(__style.gap(gpui::px(#v))),
             ("padding", [t, r, b, l]) => {
@@ -236,14 +257,44 @@ fn lower_chain(
             ("width", [v]) => quote!(__style.w(#v)),
             ("height", [v]) => quote!(__style.h(#v)),
             ("min_width", [v]) => quote!(__style.min_w(gpui::px(#v))),
+            ("min_height", [v]) => quote!(__style.min_h(gpui::px(#v))),
+            ("max_height", [v]) => quote!(__style.max_h(gpui::px(#v))),
+            ("aspect_ratio", [v]) => quote!(__style.aspect_ratio(#v)),
+            ("white_space", [v]) => quote!({
+                __style.text_style().white_space = Some(#v);
+                __style
+            }),
+            ("text_overflow", [v]) => quote!({
+                __style.text_style().text_overflow = #v;
+                __style
+            }),
+            ("line_clamp", [v]) => quote!(__style.line_clamp(#v)),
             ("max_width", [v]) => quote!(__style.max_w(gpui::px(#v))),
             ("border_radius", [v]) => quote!(__style.rounded(gpui::px(#v))),
+            ("font", [v]) => quote!(__style.font(#v)),
+            ("font_family", [v]) => quote!(__style.font_family(#v)),
+            ("font_features", [v]) => quote!(__style.font_features(#v)),
+            ("font_style", [v]) => quote!({
+                __style.text_style().font_style = Some(#v);
+                __style
+            }),
+            ("line_height", [v]) => quote!(__style.line_height(#v)),
+            ("font_weight", [Expr::Path(v)])
+                if v.path.segments.iter().any(|s| s.ident == "FontWeight") =>
+            {
+                quote!(__style.font_weight(#v))
+            }
             ("font_size", [v]) => quote!(__style.text_size(gpui::px(#v))),
             ("font_weight", [v]) => quote!(__style.font_weight(gpui::FontWeight((#v) as f32))),
             ("border", [w, c]) if is_rgba_expression(c) => {
                 quote!(__style.border(gpui::px(#w)).border_color(#c))
             }
             ("border", [w, c]) => quote!(__style.border(gpui::px(#w)).border_color(gpui::rgb(#c))),
+            ("position_static", []) => quote!({
+                __style.style().position = Some(gpui::Position::Relative);
+                __style.style().inset = Default::default();
+                __style
+            }),
             ("position_relative", []) => quote!(__style.relative()),
             ("position_absolute", []) => quote!(__style.absolute()),
             ("top", [v]) => quote!(__style.top(gpui::px(#v))),

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Package the local GPUI RSC syntax extension as a VSIX for Cursor."""
 
+import json
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).parent
-OUTPUT = ROOT / "dist" / "gpui-rsc-syntax-0.2.0.vsix"
+VERSION = json.loads((ROOT / "package.json").read_text())["version"]
+OUTPUT = ROOT / "dist" / f"gpui-rsc-syntax-{VERSION}.vsix"
 CONTENT_TYPES = '''<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="json" ContentType="application/json" />
@@ -21,7 +23,7 @@ CONTENT_TYPES = '''<?xml version="1.0" encoding="utf-8"?>
 MANIFEST = '''<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
-    <Identity Language="en-US" Id="gpui-rsc-syntax" Version="0.2.0" Publisher="local" />
+    <Identity Language="en-US" Id="gpui-rsc-syntax" Version="{version}" Publisher="local" />
     <DisplayName>GPUI RSX Syntax</DisplayName>
     <Description>Rust-aware syntax highlighting, GPUI completions, and markup formatting for .rsx components.</Description>
     <Tags>rsx;rust;html</Tags>
@@ -46,7 +48,7 @@ def main() -> None:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(OUTPUT, "w", ZIP_DEFLATED) as package:
         package.writestr("[Content_Types].xml", CONTENT_TYPES)
-        package.writestr("extension.vsixmanifest", MANIFEST)
+        package.writestr("extension.vsixmanifest", MANIFEST.replace("{version}", VERSION))
         package.write(ROOT / "package.json", "extension/package.json")
         package.write(ROOT / "extension.js", "extension/extension.js")
         package.write(

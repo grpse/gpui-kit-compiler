@@ -2,7 +2,7 @@
   "name": "gpui-rsc-syntax",
   "displayName": "GPUI RSX Syntax",
   "description": "Rust-aware syntax highlighting, GPUI completions, and markup formatting for .rsx components.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "local",
   "main": "./extension.js",
   "engines": {

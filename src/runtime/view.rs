@@ -135,17 +135,21 @@ fn sample_fps(window: &Window, overlay: Entity<FpsOverlay>) {
     });
 }
 
+/// Default flow layout for compiled HTML elements. Classes refine these defaults.
+/// Absolute elements opt out of the width bound in generated renderers.
+pub fn element_container() -> Div {
+    div().min_w_0().max_w_full().flex_shrink_0().flex_wrap()
+}
+
 impl HtmlView {
-    fn new(
-        page: Page,
-        title: String,
-        calculate: fn(&HashMap<String, Value>, u64) -> Snapshot,
-        on_change: Option<fn(&mut HashMap<String, Value>, &str, &Value)>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let engine = Engine::start(page.defaults.clone(), calculate, on_change);
-        Self::new_with_engine(page, title, engine, false, window, cx)
+    pub fn content_height(&self, window: &Window) -> f32 {
+        let title_height = if matches!(window.window_decorations(), Decorations::Client { .. }) {
+            // GPUI Kit 0.7's client TitleBar has a fixed 34px height.
+            34.0
+        } else {
+            0.0
+        };
+        (f32::from(window.viewport_size().height) - title_height).max(0.0)
     }
 
     fn new_component(
@@ -200,6 +204,10 @@ impl HtmlView {
             #[cfg(feature = "debug-fps")]
             fps_overlay,
         };
+        view.subscriptions
+            .push(cx.observe_window_bounds(window, |_, _, cx| {
+                cx.notify();
+            }));
         view.build_controls(window, cx);
         let initial = view.snapshot.clone();
         view.sync_controls(&initial, true, window, cx);
@@ -533,7 +541,7 @@ impl HtmlView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let root = self.page.root.clone();
-        div()
+        element_container()
             .w_full()
             .child(self.render_node(&Node::Element(root), props, viewport_width, window, cx))
             .into_any_element()
@@ -573,6 +581,28 @@ impl HtmlView {
 
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// Shape adjacent literal text and interpolations together, preserving unit spacing.
+    pub fn inline_text(&self, element: &Element, start: usize, end: usize) -> String {
+        let mut text = String::new();
+        for child in &element.children[start..end] {
+            match child {
+                Node::Text(value) => text.push_str(value),
+                Node::Element(value) => {
+                    let bound = value
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| binding.get(&self.snapshot));
+                    text.push_str(&display_value(
+                        bound.as_ref(),
+                        value,
+                        self.page.output_formatter,
+                    ));
+                }
+            }
+        }
+        text.trim().to_owned()
     }
 
     pub fn render_output(&self, element: &Element, container: Div) -> AnyElement {
@@ -666,7 +696,7 @@ impl HtmlView {
     pub fn render_button(
         &self,
         element: &Element,
-        container: Div,
+        _container: Div,
         style: InlineStyle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -678,7 +708,9 @@ impl HtmlView {
         let args = element.args.clone();
         let label = element.text_content();
         let mut button = Button::new(element.attr("id").unwrap_or(binding.name).to_owned())
-            .label(label)
+            .accessibility_label(label.clone())
+            .child(button_label(label, &style))
+            .h_auto()
             .secondary()
             .on_click(cx.listener(move |view, _, _, _| {
                 let values = args
@@ -688,7 +720,7 @@ impl HtmlView {
                 binding.set(&view.engine, Value::Arguments(values));
             }));
         button.style().refine(&style);
-        container.child(button).into_any_element()
+        button.into_any_element()
     }
 
     pub fn render_input(
@@ -835,6 +867,35 @@ impl HtmlView {
         }
     }
 
+    /// Read a video's current source from a native renderer.
+    pub fn video_source(&self, id: &str, cx: &Context<Self>) -> String {
+        self.videos
+            .get(id)
+            .map(|player| player.read(cx).source().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// Replace a video source and reset playback.
+    pub fn set_video_source(&mut self, id: &str, source: String, cx: &mut Context<Self>) {
+        if let Some(player) = self.videos.get(id) {
+            player.update(cx, |player, cx| player.set_source(source, cx));
+            cx.notify();
+        }
+    }
+
+    /// Control a video from buttons outside its rendered surface.
+    pub fn video_playback(
+        &mut self,
+        id: &str,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(player) = self.videos.get(id) {
+            player.update(cx, |player, cx| player.playback(action, window, cx));
+        }
+    }
+
     pub fn render_video(
         &mut self,
         element: &Element,
@@ -934,6 +995,17 @@ impl HtmlView {
     }
 }
 
+fn button_label(label: String, style: &InlineStyle) -> Div {
+    let mut text = div()
+        .w_full()
+        .min_w_0()
+        .h_auto()
+        .whitespace_normal()
+        .text_center();
+    text.style().text.refine(&style.text);
+    text.child(label)
+}
+
 fn parse_date(value: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
@@ -951,7 +1023,7 @@ impl Render for HtmlView {
         self.videos
             .retain(|id, _| self.rendered_video_ids.contains(id));
         if self.embedded {
-            return div().w_full().child(root);
+            return element_container().w_full().child(root);
         }
         div()
             .relative()
@@ -966,6 +1038,10 @@ impl Render for HtmlView {
                 div()
                     .id("html-document-scroll")
                     .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .w_full()
+                    .whitespace_normal()
                     .overflow_y_scroll()
                     .child(root),
             )
@@ -1019,6 +1095,37 @@ pub fn run_with_config(definition: Definition, startup: StartupConfig) {
     if std::env::args().nth(1).as_deref() == Some("--validate") {
         return;
     }
+    #[cfg(target_os = "linux")]
+    {
+        let (engine, dispatch) = Engine::prepare(page.defaults.clone(), calculate, on_change);
+        let shutdown = engine.clone();
+        let ui = std::thread::Builder::new()
+            .name("rsc-ui".into())
+            .spawn(move || {
+                // Also wake the dispatcher if UI initialization panics.
+                struct StopDispatcher(Engine);
+                impl Drop for StopDispatcher {
+                    fn drop(&mut self) {
+                        self.0.shutdown();
+                    }
+                }
+                let _stop = StopDispatcher(shutdown);
+                run_ui(page, title, engine, startup);
+            })
+            .expect("failed to start UI thread");
+        dispatch();
+        if let Err(panic) = ui.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let engine = Engine::start(page.defaults.clone(), calculate, on_change);
+        run_ui(page, title, engine, startup);
+    }
+}
+
+fn run_ui(page: Page, title: String, engine: Engine, startup: StartupConfig) {
     configure_application(application()).run(move |cx| {
         init(cx);
         let restore_bounds =
@@ -1053,7 +1160,7 @@ pub fn run_with_config(definition: Definition, startup: StartupConfig) {
             },
             cx,
             move |window, cx| {
-                cx.new(|cx| HtmlView::new(page, title, calculate, on_change, window, cx))
+                cx.new(|cx| HtmlView::new_with_engine(page, title, engine, false, window, cx))
             },
         )
         .expect("failed to open GPUI window");
@@ -1063,6 +1170,48 @@ pub fn run_with_config(definition: Definition, startup: StartupConfig) {
 #[cfg(all(test, target_os = "linux"))]
 mod image_tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn gpui_initializes_and_exits_on_a_dedicated_ui_thread() {
+        std::thread::Builder::new()
+            .name("rsc-ui-test".into())
+            .spawn(|| {
+                configure_application(gpui_kit::platform::headless()).run(|cx| {
+                    init(cx);
+                    cx.spawn(async move |cx| cx.update(|cx| cx.quit())).detach();
+                });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn flow_defaults_and_button_labels_do_not_truncate_text() {
+        let mut container = element_container();
+        let defaults = container.style();
+        assert_eq!(defaults.flex_shrink, Some(0.0));
+        assert_eq!(defaults.flex_wrap, Some(gpui::FlexWrap::Wrap));
+        assert_eq!(defaults.max_size.width, Some(gpui::relative(1.0).into()));
+
+        let mut label = button_label("Cup prediction".into(), &InlineStyle::default());
+        assert_eq!(
+            label.style().text.white_space,
+            Some(gpui::WhiteSpace::Normal)
+        );
+        assert_eq!(label.style().text.text_overflow, None);
+
+        let mut explicit = InlineStyle::default();
+        explicit.text.white_space = Some(gpui::WhiteSpace::Nowrap);
+        explicit.text.text_overflow = Some(gpui::TextOverflow::Truncate("…".into()));
+        let mut label = button_label("Cup prediction".into(), &explicit);
+        assert_eq!(label.style().text.white_space, explicit.text.white_space);
+        assert_eq!(
+            label.style().text.text_overflow,
+            explicit.text.text_overflow
+        );
+    }
+
     use std::{
         io::{Read, Write},
         net::TcpListener,

@@ -6,6 +6,8 @@ const styleProperties = [
   "display", "flexDirection", "flexWrap", "flex", "gap", "padding",
   "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
   "background", "backgroundColor", "color", "textColor", "fontSize", "fontWeight",
+  "font", "fontFamily", "fontStyle", "fontFeatures", "lineHeight", "whiteSpace", "textOverflow", "lineClamp",
+  "flexShrink", "flexBasis", "minHeight", "maxHeight", "aspectRatio",
   "border", "borderColor", "borderRadius", "width", "height", "minWidth",
   "maxWidth", "margin", "marginAuto", "justifyContent", "alignItems",
   "position", "top", "right", "bottom", "left", "overflow", "overflowY",
@@ -56,63 +58,106 @@ function provideFormattingEdits(document, options) {
   const indentSize = Number.isInteger(options.tabSize) && options.tabSize > 0 ? options.tabSize : 4;
   const indentUnit = options.insertSpaces ? " ".repeat(indentSize) : "\t";
   const stack = [];
-  const lineDepths = new Map();
+  const lineIndents = new Map();
   let baseline;
   let cursor = 0;
+  const depth = () => stack.reduce((total, frame) => total + frame.indent, 0);
+  const record = (line, level) => {
+    if (!lineIndents.has(line)) lineIndents.set(line, baseline + indentUnit.repeat(level));
+  };
 
   while (cursor < source.length) {
     const lineNumber = document.positionAt(cursor).line;
     const lineStart = lineStarts[lineNumber] ?? 0;
-    const lineText = lines[lineNumber] ?? "";
-    const linePrefix = source.slice(lineStart, cursor);
-    const beginsWithTag = /^\s*$/.test(linePrefix);
+    const beginsLine = /^\s*$/.test(source.slice(lineStart, cursor));
     const activeMarkup = stack.length > 0;
+    const character = source[cursor];
 
-    if (source[cursor] !== "<" || (!activeMarkup && !beginsWithTag)) {
+    // Rust strings and comments may contain fake tags or unmatched braces.
+    // Plain markup text remains text, including apostrophes and quotes.
+    const inRust = !activeMarkup || stack.at(-1).kind === "brace";
+    if (inRust) {
+      const rest = source.slice(cursor);
+      const raw = rest.match(/^(?:b)?r(#+)?"/);
+      if (raw) {
+        const end = source.indexOf('"' + (raw[1] || ""), cursor + raw[0].length);
+        cursor = end < 0 ? source.length : end + 1 + (raw[1] || "").length;
+        continue;
+      }
+      if (rest.startsWith("//")) {
+        cursor = source.indexOf("\n", cursor);
+        if (cursor < 0) break;
+        continue;
+      }
+      if (rest.startsWith("/*")) {
+        let comments = 1;
+        cursor += 2;
+        while (cursor < source.length && comments) {
+          if (source.startsWith("/*", cursor)) { comments += 1; cursor += 2; }
+          else if (source.startsWith("*/", cursor)) { comments -= 1; cursor += 2; }
+          else cursor += 1;
+        }
+        continue;
+      }
+      if (character === '"' || (character === "'" && /^'(?:\\.|[^'\\])'/.test(rest))) {
+        const quote = character;
+        cursor += 1;
+        while (cursor < source.length) {
+          if (source[cursor] === "\\") cursor += 2;
+          else if (source[cursor++] === quote) break;
+        }
+        continue;
+      }
+    }
+
+    if (activeMarkup && character === "{") {
+      if (beginsLine) record(lineNumber, depth());
+      // The interpolation wrapper adds no level: the if body supplies it.
+      const wrapper = /^\{\s*if\b/.test(source.slice(cursor));
+      stack.push({ kind: "brace", indent: wrapper ? 0 : 1 });
+      cursor += 1;
+      continue;
+    }
+    if (activeMarkup && character === "}" && stack.at(-1).kind === "brace") {
+      stack.pop();
+      if (beginsLine) record(lineNumber, depth());
       cursor += 1;
       continue;
     }
 
+    if (character !== "<" || (!activeMarkup && !beginsLine)) {
+      if (activeMarkup && beginsLine && !/\s/.test(character)) record(lineNumber, depth());
+      cursor += 1;
+      continue;
+    }
     const tag = parseMarkupTag(source, cursor);
-    if (!tag) {
-      cursor += 1;
-      continue;
-    }
-
-    // Uppercase tags are imported components and must be self-closing in .rsx.
-    // Ignoring non-self-closing names also avoids treating Rust generic types as markup.
+    if (!tag) { cursor += 1; continue; }
+    // Imported components are self-closing; other uppercase names are Rust generics.
     if (tag.component && (!tag.selfClosing || tag.closing)) {
       cursor = tag.end;
       continue;
     }
-
+    if (!activeMarkup) baseline = (lines[lineNumber] ?? "").match(/^\s*/)[0];
     if (tag.closing) {
-      const stackIndex = stack.lastIndexOf(tag.name);
+      const stackIndex = stack.findLastIndex((frame) => frame.kind === "tag" && frame.name === tag.name);
       if (stackIndex >= 0) stack.length = stackIndex;
-      if (beginsWithTag && !lineDepths.has(lineNumber)) {
-        lineDepths.set(lineNumber, stack.length);
-      }
-    } else {
-      if (beginsWithTag && !lineDepths.has(lineNumber)) {
-        lineDepths.set(lineNumber, stack.length);
-      }
-      if (baseline === undefined && stack.length === 0) {
-        baseline = lineText.match(/^\s*/)?.[0] ?? "";
-      }
-      if (!tag.selfClosing && !tag.component && !voidTags.has(tag.name.toLowerCase())) {
-        stack.push(tag.name);
-      }
+    }
+    if (beginsLine) record(lineNumber, depth());
+    const endLine = document.positionAt(tag.end - 1).line;
+    for (let line = lineNumber + 1; line <= endLine; line += 1) {
+      const closingDelimiter = /^\s*\/?>\s*$/.test(lines[line]);
+      record(line, depth() + (closingDelimiter ? 0 : 1));
+    }
+    if (!tag.closing && !tag.selfClosing && !tag.component && !voidTags.has(tag.name.toLowerCase())) {
+      stack.push({ kind: "tag", name: tag.name, indent: 1 });
     }
     cursor = tag.end;
   }
 
-  if (baseline === undefined) return [];
-
   const edits = [];
-  for (const [lineNumber, depth] of lineDepths) {
+  for (const [lineNumber, desiredIndent] of lineIndents) {
     const line = lines[lineNumber] ?? "";
     const currentIndent = line.match(/^\s*/)?.[0] ?? "";
-    const desiredIndent = baseline + indentUnit.repeat(depth);
     if (currentIndent === desiredIndent) continue;
     edits.push(
       new vscode.TextEdit(

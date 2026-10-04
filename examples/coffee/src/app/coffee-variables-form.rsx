@@ -5,11 +5,11 @@ pub fn CoffeeVariablesForm(method: &mut String, section: &str, dose: &mut f32, w
       controlsStack: {
           display: "flex", flexDirection: "column",
           gap: if context.viewport_width <= 768.0 { 16.0 } else { 20.0 },
-          flex: 1, width: gpui::Length::Percent(1.0), minWidth: 0.0,
-          alignItems: if context.viewport_width <= 768.0 { "center" } else { "stretch" }
+          flexShrink: 0, width: gpui::Length::Percent(1.0), minWidth: 0.0,
+          alignItems: "stretch"
       },
       recipeCard: {
-          display: "flex", flexDirection: "column", flex: 1,
+          display: "flex", flexDirection: "column", flexShrink: 0,
           width: gpui::Length::Percent(1.0), minWidth: 0.0,
           gap: if context.viewport_width <= 768.0 { 16.0 } else { 18.0 },
           backgroundColor: rgba(33.0 / 255.0, 28.0 / 255.0, 23.0 / 255.0),
@@ -18,7 +18,7 @@ pub fn CoffeeVariablesForm(method: &mut String, section: &str, dose: &mut f32, w
           padding: if context.viewport_width <= 768.0 { 18.0 } else { 22.0 }
       },
       actionsCard: {
-          display: "flex", flexDirection: "column", flex: 1,
+          display: "flex", flexDirection: "column", flexShrink: 0,
           width: gpui::Length::Percent(1.0), minWidth: 0.0,
           gap: if context.viewport_width <= 768.0 { 16.0 } else { 18.0 },
           backgroundColor: rgba(33.0 / 255.0, 28.0 / 255.0, 23.0 / 255.0),
@@ -33,7 +33,7 @@ pub fn CoffeeVariablesForm(method: &mut String, section: &str, dose: &mut f32, w
       fieldLabel: { fontSize: 14.0, fontWeight: 600 },
       fieldSelect: { width: gpui::Length::Percent(1.0) },
       fieldHelp: { fontSize: 11.0, color: rgba(152.0 / 255.0, 140.0 / 255.0, 126.0 / 255.0) },
-      fieldRow: { display: "flex", justifyContent: "space-between" },
+      fieldRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8.0 },
       fieldValue: { fontSize: 14.0, fontWeight: 600, color: rgba(240.0 / 255.0, 180.0 / 255.0, 107.0 / 255.0) },
       actionsTitle: { fontSize: 18.0, fontWeight: 700 }
   });

@@ -48,6 +48,8 @@ impl SelectOption {
 
 pub struct StyleContext<'a> {
     pub viewport_width: f32,
+    /// Height of the window's content area, excluding client decorations.
+    pub viewport_height: f32,
     pub props: &'a ComponentProps,
 }
 

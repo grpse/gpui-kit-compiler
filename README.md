@@ -22,6 +22,25 @@ The app package depends on `gpui`, `gpui-kit`, and the `gpui-rsc` runtime. The c
 
 On Linux, GPUI needs Wayland or X11 plus its native graphics and windowing libraries; see the [GPUI Kit installation guide](https://gpui-kit.com/docs/installation/).
 
+## Interactive desktop examples
+
+Three native RSX apps demonstrate interactive tabs, resizable panes, browsing, and background work:
+
+| Example | Features |
+| --- | --- |
+| [File browser](examples/file-browser/README.md) | Folder tabs, navigation history, filtering, virtualized rows, text/image previews, and file details |
+| [Disk space explorer](examples/disk-explorer/README.md) | Cancellable scans, a drill-down treemap, logical/allocated byte totals, largest files, and scan reports |
+| [Video editor](examples/video-editor/README.md) | FFprobe import, frame preview, trimming, rotation, resizing, muting, and cancellable FFmpeg MP4 export |
+
+Compile an app's `.rsx` sources, then run its Cargo package. Sharing the repository's target directory reuses GPUI dependencies:
+
+```sh
+cargo run -- compile examples/file-browser
+cargo run --manifest-path examples/file-browser/Cargo.toml --target-dir target
+```
+
+Replace `file-browser` with `disk-explorer` or `video-editor` for the other apps. Their READMEs include startup arguments, tool requirements, and tests. The views use `#[gpui]` to preserve native Rust state and callback signatures; the filesystem and media operations live in ordinary Rust modules.
+
 ## Component functions
 
 An `.rsx` file is Rust source. Each exported `pub fn` whose body contains markup declares a component, and one file can export multiple components. Rust imports, helper functions, constants, and types remain ordinary Rust. The compiler extracts each component’s markup and emits its GPUI renderer and component definition into that module’s `.inter.rs` file. Components need no `<html>`, `<body>`, `<script>`, or `<template>` wrappers.
@@ -56,6 +75,8 @@ pub fn GrindSlider() -> gpui::AnyElement {
 ```
 
 The compiler keeps the signal alive for the component definition. A control bound with `value={grind}` updates it, and `on-click={grind.set(6)}` runs a Rust action that can update it; both changes redraw the declaring view and any child view that receives or renders `grind`. The same signal can back multiple controls or child components; give each control a unique `id` so updates stay synchronized across them. A signal-only root can omit a calculation callback. Use component parameters when a child should receive a value from its parent without owning that state.
+
+On Linux, `runtime::run_with_config` initializes and runs GPUI on a dedicated `rsc-ui` thread while the calling main thread runs the state dispatcher. UI event setters, `on_change`, and calculations execute serially on that dispatcher. `Engine::dispatch(move || { ... })` also queues application work there. The channel blocks when idle and wakes on delivery, so no polling or separate semaphore is needed. Spawn a background worker inside a callback for long independent jobs, and publish results with `Engine::set` or signals. UI exit (including an initialization panic) stops the dispatcher and joins the UI thread. Other platforms keep native UI on the calling thread and use a state worker. `Engine::start` continues to provide a standalone worker for tests and embedded usage.
 
 For a calculated app, declare `pub fn calculate(values: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot` in the `.rsx` file. The compiler wires it into the root component automatically, along with optional `pub fn on_change(values: &mut HashMap<String, Value>, changed_key: &str, value: &Value)` and `pub fn output_format(name: &str, value: &Value) -> String` functions. Simple child properties such as `<CoffeeProfile acidity={acidity} />` are inferred as readable calculated values; local signals with those names are passed through directly. This removes the need for a handwritten `definition()` and binding list.
 
@@ -108,10 +129,15 @@ pub fn badge(message: &str) -> impl IntoElement {
 | `<Custom ctor={Custom::with_state(state)} />` | `Custom::with_state(state)` |
 | `flex`, `gap-2`, `p={px(8.0)}` | `.flex()`, `.gap_2()`, `.p(px(8.0))` |
 | `disabled={true}` | `.disabled(true)` |
+| `item:args={("Name", "GPUI Kit", 1)}` | `.item("Name", "GPUI Kit", 1)` |
+| `focus-trap:args={("trap", &handle)}` | `.focus_trap("trap", &handle)` |
+| `<Tag::primary />` | `Tag::primary()` |
 | `{expression}` or nested tags | `.child(expression)` |
 | `children={items.map(\|item\| <Label args={item} />)}` | `.children(items.map(\|item\| Label::new(item)))` |
 
 Lowercase tags call functions; names ending in an uppercase type call `::new`. `args` supplies one constructor argument, or expands a tuple into multiple arguments; use `args={(tuple_value,)}` to pass a tuple as one argument. `ctor` overrides the constructor and supports generic types, alternate factories, existing entities, or complete Rust builder expressions. Builder attributes follow source order, before child nodes. A bare attribute calls a method with no arguments, so flags requiring a boolean need `={true}`. Use the actual GPUI builder methods in direct mode, for example `<img args={url} />` rather than the HTML-style `src` attribute.
+
+Builder attributes normally pass one value, including tuples: `id={("row", index)}` calls `.id(("row", index))`. Add `:args` to a method name to expand a literal tuple into multiple arguments. Repeating a builder attribute repeats the call in source order. For a method that takes one tuple with `:args`, wrap it in a one-element tuple: `method:args={((a, b),)}`. `method:args={()}` calls the method without arguments.
 
 Rust blocks, closures, iteration, conditional branches, private functions, generic signatures, and `impl` methods are supported. If conditional branches return different element types, use `.into_any_element()` on each branch. Plain text becomes a string child with whitespace collapsed; quoted text or `{...}` preserves exact text. The compiler consumes `#[gpui]`; it is not a Rust macro. Unmarked exported markup functions continue to use the stateful component runtime described above.
 
@@ -122,6 +148,31 @@ cargo run -- convert examples/media-playground/src/native.rsx /tmp/native.rs
 ```
 
 The converter also exposes `gpui_rsc::convert_source(&str)` and `gpui_rsc::convert_file(input, output)` with the `compiler` feature. It formats the output; ordinary comments are omitted, while Rust documentation attributes remain. Conversion preserves function signatures rather than the HTML runtime's signal and property semantics. Use `Definition::native` to display a converted function inside a stateful component, as demonstrated by [`native.rsx`](examples/media-playground/src/native.rsx).
+
+#### GPUI Kit component coverage
+
+The compiler supports the components on the [GPUI Kit component index](https://gpui-kit.com/component/) through direct RSX in `#[gpui]` functions or the `convert` command. The [compatibility fixture](tests/fixtures/gpui-kit/src/components.rsx) has an example for each of the 77 pages reviewed on October 4, 2026, including stateful controls, charts, tables, docks, dialogs, settings, and virtual lists. Its [guide](tests/fixtures/gpui-kit/README.md) explains how to use and check these recipes.
+
+```rust
+use gpui_kit::IntoElement;
+use gpui_kit::component::description_list::DescriptionList;
+
+#[gpui]
+pub fn Details() -> impl IntoElement {
+    <DescriptionList
+        item:args={("Name", "GPUI Kit", 1)}
+        item:args={("License", "Apache-2.0", 1)} />
+}
+```
+
+Import the types and builder traits listed by the component's documentation. Native state entities, subscriptions, delegates, `Window`, and `Context` remain ordinary Rust. Nested markup works inside builder arguments and callbacks; use `ctor={builder}` to extend a supplied builder, or `ctor={Type::<T>::factory(...)}` for a generic or alternate constructor. Notifications, plot scales, and dock layouts can return their own Rust types rather than `IntoElement`.
+
+The compatibility crate compiles the RSX against the actual GPUI Kit 0.7.0 dependency:
+
+```sh
+cargo test
+cargo check --manifest-path tests/fixtures/gpui-kit/Cargo.toml --target-dir target
+```
 
 #### Register a native renderer
 
@@ -190,13 +241,36 @@ pub fn Preview(water: f32) -> gpui::AnyElement {
 }
 ```
 
+Typography follows GPUI's inherited text styles. Adjacent text and interpolations (for example `{dose} g` or `{grind}/10`) are shaped as one text run, preserving spaces and keeping units inline.
+
+```rust
+let myStyles = styles({
+    body: {
+        fontFamily: "sans-serif",
+        fontSize: 14.0,
+        fontWeight: gpui::FontWeight::MEDIUM,
+        fontStyle: "normal",
+        lineHeight: gpui::relative(1.4),
+        fontFeatures: gpui::FontFeatures::default()
+    }
+});
+```
+
+`fontSize` uses logical pixels; `lineHeight` accepts GPUI lengths such as `gpui::px(20.0)`, `gpui::rems(1.25)`, or `gpui::relative(1.4)` (a font-size multiplier). Numeric font weights remain supported. `fontStyle` accepts `"normal"`, `"italic"`, `"oblique"`, or a GPUI `FontStyle`. Use `font: gpui::font("sans-serif")` to supply a complete GPUI font, including fallbacks and OpenType features. GPUI 0.3.7 has no native letter-spacing field; spacing is controlled through text shaping and line height.
+
 The compiler evaluates the style bundle in generated element render functions, with named locals sourced from the component’s attributes. This pattern is useful for simple parameter-driven graphics; native components can handle more involved drawings and motion.
 
-Style bundle properties cover the compiler’s supported GPUI style set: display and flex layout, gaps, padding, colors, font size and weight, borders and corner radius, width and height constraints, automatic margins, justification and alignment, position and offsets, overflow, and opacity. Use Rust tuples for shorthands such as `padding: (top, right, bottom, left)` and `border: (width, color)`. Style values are Rust expressions, so responsive values and helper calls can be written directly in the component function.
+Compiled elements keep their natural height, wrap text, and bound their width to their parent's available width. Conditional branches and imported components fill that width. Button classes apply to the button once; labels wrap rather than receiving GPUI Kit's default ellipsis. Classes can opt into `whiteSpace: "nowrap"`, `textOverflow: "ellipsis"`, `lineClamp: 2`, or `overflow: "hidden"`. Text settings inherit through descendants.
+
+`position: "absolute"` removes an element from normal flow and opts out of the default width bound. Offsets (`top`, `right`, `bottom`, `left`) require absolute positioning; static offsets are ignored. GPUI places absolute elements relative to their parent; `position: "relative"` uses normal flow. `position: "static"` maps to GPUI's normal-flow position without offsets. GPUI does not implement the browser's full positioning model (for example, fixed/sticky positioning or searching for the nearest positioned ancestor).
+
+Layout styles also support `flexShrink`, `flexBasis` (a GPUI length), `minHeight`, `maxHeight` (logical pixels), and `aspectRatio`. `context.viewport_height` is the content area's height, excluding the client title bar, so `minHeight: context.viewport_height` can fill short pages while allowing taller pages to scroll.
+
+Style bundle properties cover the compiler’s supported GPUI style set: display and flex layout, gaps, padding, colors, font family, size, weight, style, features and line height, borders and corner radius, width and height constraints, automatic margins, justification and alignment, position and offsets, overflow, and opacity. Use Rust tuples for shorthands such as `padding: (top, right, bottom, left)` and `border: (width, color)`. Style values are Rust expressions, so responsive values and helper calls can be written directly in the component function.
 
 The coffee app shows a recipe, cup prediction, and action tabs alongside method-specific coffee drawings. Changing recipe inputs updates the owning views through events. The scores are relative estimates; coffee origin, roast, water chemistry, and tasting feedback are not modeled. The optional `debug-fps` build feature adds an FPS overlay and requests continuous frames while measuring.
 
-The Cursor extension associates `.rsx` with Rust-aware markup highlighting, completions for GPUI elements, component tags, bindings, and style declarations, and nested markup indentation formatting. Run **Format Document** to align markup tags with the document's indentation settings.
+The Cursor extension associates `.rsx` with Rust-aware markup highlighting, completions for GPUI elements, component tags, bindings, and style declarations, and nested markup indentation formatting. Run **Format Document** to align markup elements, multiline attributes, and embedded `if`/`else` branches with the document's indentation settings. Package version 0.3.0 with `python3 cursor-extension/build_vsix.py`, then install `cursor-extension/dist/gpui-rsc-syntax-0.3.0.vsix` in Cursor.
 
 ## Application startup
 

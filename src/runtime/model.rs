@@ -331,7 +331,9 @@ impl Binding {
     }
     pub fn set(&self, engine: &Engine, value: Value) {
         if let Some(setter) = &self.setter {
-            setter(engine, value);
+            let setter = Arc::clone(setter);
+            let target = engine.clone();
+            engine.dispatch(move || setter(&target, value));
         }
     }
     pub(crate) fn subscribe_signal(&self) -> Option<Arc<Mutex<Receiver<()>>>> {
@@ -400,6 +402,8 @@ enum Message {
     Set(String, Value),
     Invoke(String),
     Reset,
+    Dispatch(Box<dyn FnOnce() + Send>),
+    Shutdown,
 }
 
 #[derive(Clone)]
@@ -416,6 +420,20 @@ impl Engine {
         calculate: fn(&HashMap<String, Value>, u64) -> Snapshot,
         on_change: Option<fn(&mut HashMap<String, Value>, &str, &Value)>,
     ) -> Self {
+        let (engine, run) = Self::prepare(defaults, calculate, on_change);
+        thread::Builder::new()
+            .name("rsc-calculation-worker".into())
+            .spawn(run)
+            .expect("failed to start calculation worker");
+        engine
+    }
+
+    /// Build the dispatcher without spawning it; the caller owns its event loop.
+    pub(crate) fn prepare(
+        defaults: HashMap<String, Value>,
+        calculate: fn(&HashMap<String, Value>, u64) -> Snapshot,
+        on_change: Option<fn(&mut HashMap<String, Value>, &str, &Value)>,
+    ) -> (Self, impl FnOnce() + Send + 'static) {
         let shared = Arc::new(Mutex::new(calculate(&defaults, 0)));
         let (sender, receiver) = mpsc::channel();
         let subscribers = Arc::new(Mutex::new(Vec::<Sender<Snapshot>>::new()));
@@ -423,59 +441,75 @@ impl Engine {
         let shared_worker = Arc::clone(&shared);
         let subscribers_worker = Arc::clone(&subscribers);
         let signals_worker = Arc::clone(&signals);
-        thread::Builder::new()
-            .name("rsc-calculation-worker".into())
-            .spawn(move || {
-                let mut values = defaults.clone();
-                let mut reset_epoch = 0;
-                while let Ok(message) = receiver.recv() {
-                    match message {
-                        Message::Set(key, value) => {
-                            values.insert(key.clone(), value.clone());
-                            if let Some(on_change) = on_change {
-                                on_change(&mut values, &key, &value);
-                            }
-                        }
-                        Message::Invoke(key) => {
-                            if let Some(on_change) = on_change {
-                                on_change(&mut values, &key, &Value::Arguments(Vec::new()));
-                            }
-                        }
-                        Message::Reset => {
-                            values = defaults.clone();
-                            reset_epoch += 1;
+        let run = move || {
+            let mut values = defaults.clone();
+            let mut reset_epoch = 0;
+            while let Ok(message) = receiver.recv() {
+                match message {
+                    Message::Shutdown => break,
+                    Message::Dispatch(callback) => {
+                        callback();
+                        continue;
+                    }
+                    Message::Set(key, value) => {
+                        values.insert(key.clone(), value.clone());
+                        if let Some(on_change) = on_change {
+                            on_change(&mut values, &key, &value);
                         }
                     }
-                    let signal_updates = signals_worker
-                        .lock()
-                        .expect("engine signal registry lock poisoned")
-                        .iter()
-                        .filter_map(|(key, signal)| {
-                            values
-                                .get(key)
-                                .cloned()
-                                .map(|value| (signal.clone(), value))
-                        })
-                        .collect::<Vec<_>>();
-                    for (signal, value) in signal_updates {
-                        Signal::sync_from_engine(&signal, value);
+                    Message::Invoke(key) => {
+                        if let Some(on_change) = on_change {
+                            on_change(&mut values, &key, &Value::Arguments(Vec::new()));
+                        }
                     }
-                    let next = calculate(&values, reset_epoch);
-                    *shared_worker.lock().expect("snapshot lock poisoned") = next.clone();
-                    subscribers_worker
-                        .lock()
-                        .expect("snapshot subscribers lock poisoned")
-                        .retain(|subscriber| subscriber.send(next.clone()).is_ok());
+                    Message::Reset => {
+                        values = defaults.clone();
+                        reset_epoch += 1;
+                    }
                 }
-            })
-            .expect("failed to start calculation worker");
-        Self {
-            sender,
-            shared,
-            subscribers,
-            signals,
-        }
+                let signal_updates = signals_worker
+                    .lock()
+                    .expect("engine signal registry lock poisoned")
+                    .iter()
+                    .filter_map(|(key, signal)| {
+                        values
+                            .get(key)
+                            .cloned()
+                            .map(|value| (signal.clone(), value))
+                    })
+                    .collect::<Vec<_>>();
+                for (signal, value) in signal_updates {
+                    Signal::sync_from_engine(&signal, value);
+                }
+                let next = calculate(&values, reset_epoch);
+                *shared_worker.lock().expect("snapshot lock poisoned") = next.clone();
+                subscribers_worker
+                    .lock()
+                    .expect("snapshot subscribers lock poisoned")
+                    .retain(|subscriber| subscriber.send(next.clone()).is_ok());
+            }
+        };
+        (
+            Self {
+                sender,
+                shared,
+                subscribers,
+                signals,
+            },
+            run,
+        )
     }
+
+    /// Queue work on the state dispatcher. Callbacks run serially outside state locks.
+    /// Keep callbacks short, or spawn a worker for long independent jobs.
+    pub fn dispatch(&self, callback: impl FnOnce() + Send + 'static) {
+        let _ = self.sender.send(Message::Dispatch(Box::new(callback)));
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let _ = self.sender.send(Message::Shutdown);
+    }
+
     fn bind_signal(&self, key: String, signal: &Signal) {
         self.signals
             .lock()
@@ -507,6 +541,67 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_binding_dispatches_to_the_owner_thread_and_publishes_state() {
+        use std::time::Duration;
+
+        fn calculate(values: &HashMap<String, Value>, reset_epoch: u64) -> Snapshot {
+            Snapshot {
+                values: values.clone(),
+                reset_epoch,
+            }
+        }
+        let owner = thread::current().id();
+        let (engine, run) = Engine::prepare(HashMap::new(), calculate, None);
+        let updates = engine.subscribe();
+        let (called, received) = mpsc::channel();
+        let binding = Binding::write_with("job", move |engine, value| {
+            // Acquiring the snapshot here also verifies callbacks hold no state lock.
+            let _ = engine.snapshot();
+            called.send(thread::current().id()).unwrap();
+            engine.set("result", value);
+        });
+        let ui_engine = engine.clone();
+        let ui = thread::spawn(move || {
+            let ui_thread = thread::current().id();
+            binding.set(&ui_engine, Value::from("done"));
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(2)).unwrap(),
+                owner
+            );
+            assert_ne!(ui_thread, owner);
+            let snapshot = updates
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            assert_eq!(snapshot.get("result"), Some(&Value::from("done")));
+            ui_engine.shutdown();
+        });
+        run();
+        ui.join().unwrap();
+    }
+
+    #[test]
+    fn dispatch_preserves_fifo_order_and_stops_with_live_handles() {
+        let (engine, run) = Engine::prepare(
+            HashMap::new(),
+            |values, reset_epoch| Snapshot {
+                values: values.clone(),
+                reset_epoch,
+            },
+            None,
+        );
+        let (sender, receiver) = mpsc::channel();
+        for index in 0..3 {
+            let sender = sender.clone();
+            engine.dispatch(move || sender.send(index).unwrap());
+        }
+        engine.shutdown();
+        run();
+        assert_eq!(receiver.try_iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
 
     #[test]
     fn compiled_signal_binding_reads_the_matching_snapshot() {

@@ -152,6 +152,34 @@ impl VideoPlayer {
         }
     }
 
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub(crate) fn set_source(&mut self, source: String, cx: &mut Context<Self>) {
+        self.stop();
+        self.source = source;
+        self.frame = None;
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn playback(&mut self, action: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source.is_empty() {
+            return;
+        }
+        match action {
+            "play" if !self.playing => self.toggle(window, cx),
+            "pause" if self.playing => self.toggle(window, cx),
+            "stop" => {
+                self.stop();
+                self.frame = None;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stop();
         self.generation = self.generation.wrapping_add(1);
@@ -275,7 +303,13 @@ impl Render for VideoPlayer {
                 .items_center()
                 .justify_center()
                 .text_color(rgb(0xffffff))
-                .child(self.error.clone().unwrap_or_default())
+                .child(self.error.clone().unwrap_or_else(|| {
+                    if self.source.is_empty() {
+                        "Choose a video file to begin".into()
+                    } else {
+                        String::new()
+                    }
+                }))
                 .into_any_element()
         };
         let mut video = div()

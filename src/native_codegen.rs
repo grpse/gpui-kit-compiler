@@ -134,10 +134,27 @@ fn is_element_start(source: &str, position: usize) -> bool {
         }
     }
     let previous = before.chars().next_back();
+    // A block can precede a new expression statement without a semicolon.
+    // Require a tag delimiter or builder attribute so `{value}<limit` remains
+    // an ordinary Rust comparison.
+    let after_name = rest[name_end..].trim_start();
+    let after_block = previous == Some('}')
+        && (after_name.starts_with('>')
+            || after_name.starts_with("/>")
+            || after_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_'));
     previous.is_none()
+        || after_block
         || previous
             .is_some_and(|c| matches!(c, '=' | '{' | '(' | '[' | ',' | ';' | ':' | '>' | '|'))
-        || before.split_whitespace().next_back() == Some("return")
+        || before.strip_suffix("return").is_some_and(|prefix| {
+            prefix
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+        })
 }
 
 struct ElementParser<'a> {
@@ -170,7 +187,10 @@ impl ElementParser<'_> {
             self.whitespace();
             let value = if self.consume("=") {
                 self.whitespace();
-                Some(self.attribute_value()?)
+                let value_position = self.position;
+                Some(self.attribute_value().map_err(|error| {
+                    format!("<{name}> attribute {key} at byte {value_position}: {error}")
+                })?)
             } else {
                 None
             };
@@ -222,10 +242,22 @@ impl ElementParser<'_> {
             if matches!(key.as_str(), "args" | "ctor") {
                 continue;
             }
-            let method = key.replace('-', "_");
+            let (method, multiple_args) = match key.strip_suffix(":args") {
+                Some(method) => (method, true),
+                None => (key.as_str(), false),
+            };
+            let method = method.replace('-', "_");
             syn::parse_str::<syn::Ident>(&method)
                 .map_err(|_| format!("<{name}> attribute {key:?} is not a Rust method name"))?;
-            expression.push_str(&format!(".{method}({})", value.unwrap_or_default()));
+            let arguments =
+                if multiple_args {
+                    constructor_args(value.as_deref().ok_or_else(|| {
+                        format!("<{name}> {key} needs a Rust argument expression")
+                    })?)?
+                } else {
+                    value.unwrap_or_default()
+                };
+            expression.push_str(&format!(".{method}({arguments})"));
         }
         if self_closing {
             return Ok(expression);
@@ -315,7 +347,7 @@ impl ElementParser<'_> {
     fn attribute_name(&mut self) -> Result<String, String> {
         let start = self.position;
         while let Some(character) = self.source[self.position..].chars().next() {
-            if character.is_alphanumeric() || matches!(character, '_' | '-') {
+            if character.is_alphanumeric() || matches!(character, '_' | '-' | ':') {
                 self.position += character.len_utf8();
             } else {
                 break;
@@ -402,6 +434,15 @@ fn balanced_end(source: &str, start: usize, left: char, right: char) -> Result<u
     let mut depth = 0;
     let mut position = start;
     while position < source.len() {
+        // Markup text is not Rust: a URL can contain //, and apostrophes or
+        // quotes need not delimit literals. Let the RSX parser skip the whole
+        // element, including its own Rust attribute/child blocks.
+        if is_element_start(source, position) {
+            let mut parser = ElementParser { source, position };
+            parser.element()?;
+            position = parser.position;
+            continue;
+        }
         if let Some(end) = skip_literal_or_comment(source, position)? {
             position = end;
             continue;

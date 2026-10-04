@@ -337,43 +337,43 @@ pub fn App() -> gpui::AnyElement {
     let target_astringency = signal(initial_score("astringency"));
     let target_intensity = signal(initial_score("intensity"));
     let myStyles = styles({
-        recipe: { flex: 1, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "recipe", 0), tab_channel(context, "recipe", 1), tab_channel(context, "recipe", 2)) },
-        prediction: { flex: 1, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "prediction", 0), tab_channel(context, "prediction", 1), tab_channel(context, "prediction", 2)) },
-        actions: { flex: 1, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "actions", 0), tab_channel(context, "actions", 1), tab_channel(context, "actions", 2)) },
-        page: { width: gpui::Length::Percent(1.0), minWidth: 0.0, backgroundColor: rgba(23.0 / 255.0, 19.0 / 255.0, 15.0 / 255.0), textColor: rgba(244.0 / 255.0, 236.0 / 255.0, 225.0 / 255.0) },
+        recipe: { flex: context.viewport_width > 480.0, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "recipe", 0), tab_channel(context, "recipe", 1), tab_channel(context, "recipe", 2)) },
+        prediction: { flex: context.viewport_width > 480.0, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "prediction", 0), tab_channel(context, "prediction", 1), tab_channel(context, "prediction", 2)) },
+        actions: { flex: context.viewport_width > 480.0, minWidth: 0.0, padding: (10.0, 12.0), borderRadius: 9.0, color: rgba(184.0 / 255.0, 169.0 / 255.0, 153.0 / 255.0), fontSize: 13.0, fontWeight: 600, backgroundColor: rgba(tab_channel(context, "actions", 0), tab_channel(context, "actions", 1), tab_channel(context, "actions", 2)) },
+        page: { minHeight: context.viewport_height, fontFamily: "sans-serif", lineHeight: gpui::relative(1.4), width: gpui::Length::Percent(1.0), minWidth: 0.0, backgroundColor: rgba(23.0 / 255.0, 19.0 / 255.0, 15.0 / 255.0), textColor: rgba(244.0 / 255.0, 236.0 / 255.0, 225.0 / 255.0) },
         pageContent: {
             width: gpui::Length::Percent(1.0), maxWidth: 1440.0, margin: "auto",
-            paddingTop: if context.viewport_width <= 800.0 { 18.0 } else { 28.0 },
-            paddingRight: if context.viewport_width <= 800.0 { 14.0 } else { 28.0 },
-            paddingBottom: if context.viewport_width <= 800.0 { 18.0 } else { 28.0 },
-            paddingLeft: if context.viewport_width <= 800.0 { 14.0 } else { 28.0 },
+            paddingTop: if context.viewport_width <= 1000.0 { 18.0 } else { 28.0 },
+            paddingRight: if context.viewport_width <= 1000.0 { 14.0 } else { 28.0 },
+            paddingBottom: if context.viewport_width <= 1000.0 { 18.0 } else { 28.0 },
+            paddingLeft: if context.viewport_width <= 1000.0 { 14.0 } else { 28.0 },
             display: "flex", flexDirection: "column",
-            gap: if context.viewport_width <= 800.0 { 18.0 } else { 24.0 }
+            gap: if context.viewport_width <= 1000.0 { 18.0 } else { 24.0 }
         },
         pageHeader: {
-            display: "flex",
-            flexDirection: if context.viewport_width <= 800.0 { "column" } else { "row" },
-            justifyContent: if context.viewport_width <= 800.0 { "center" } else { "space-between" },
+            display: "flex", width: gpui::Length::Percent(1.0), minWidth: 0.0,
+            flexDirection: if context.viewport_width <= 1000.0 { "column" } else { "row" },
+            justifyContent: if context.viewport_width <= 1000.0 { "center" } else { "space-between" },
             alignItems: "center",
-            gap: if context.viewport_width <= 800.0 { 12.0 } else { 20.0 }
+            gap: if context.viewport_width <= 1000.0 { 12.0 } else { 20.0 }
         },
-        brandHeading: { display: "flex", flexDirection: "column", gap: 5.0 },
+        brandHeading: { display: "flex", flexDirection: "column", width: gpui::Length::Percent(1.0), minWidth: 0.0, flex: context.viewport_width > 1000.0, gap: 5.0 },
         eyebrow: { fontSize: 10.0, fontWeight: 600, color: rgba(217.0 / 255.0, 155.0 / 255.0, 89.0 / 255.0) },
         pageTitle: { fontSize: 28.0, fontWeight: 700, color: rgba(248.0 / 255.0, 241.0 / 255.0, 232.0 / 255.0) },
         pageSubtitle: { fontSize: 13.0, color: rgba(169.0 / 255.0, 155.0 / 255.0, 141.0 / 255.0) },
         buildBadge: { backgroundColor: rgba(43.0 / 255.0, 33.0 / 255.0, 24.0 / 255.0), border: (1.0, rgba(75.0 / 255.0, 57.0 / 255.0, 40.0 / 255.0)), borderRadius: 99.0, padding: (8.0, 12.0), color: rgba(224.0 / 255.0, 173.0 / 255.0, 113.0 / 255.0), fontSize: 10.0, fontWeight: 600 },
         workbench: {
             display: "flex",
-            flexDirection: if context.viewport_width <= 800.0 { "column" } else { "row" },
-            alignItems: "stretch", gap: if context.viewport_width <= 800.0 { 16.0 } else { 24.0 },
+            flexDirection: if context.viewport_width <= 1000.0 { "column" } else { "row" },
+            alignItems: "stretch", gap: if context.viewport_width <= 1000.0 { 16.0 } else { 24.0 },
             flexWrap: "nowrap", width: gpui::Length::Percent(1.0), minWidth: 0.0
         },
-        tabsCard: { display: "flex", flexDirection: "column", flex: 1, minWidth: if context.viewport_width <= 800.0 { 0.0 } else { 360.0 }, gap: 18.0 },
-        coffeeDrawing: { display: "flex", flex: 1, minWidth: if context.viewport_width <= 800.0 { 0.0 } else { 360.0 } },
-        tabBar: { display: "flex", gap: 6.0, padding: 6.0, border: (1.0, rgba(59.0 / 255.0, 49.0 / 255.0, 40.0 / 255.0)), borderRadius: 14.0, backgroundColor: rgba(33.0 / 255.0, 28.0 / 255.0, 23.0 / 255.0) },
-        tabContent: { display: "flex", flex: 1, minWidth: 0.0 },
-        tabPanel: { display: "flex", flex: 1, width: gpui::Length::Percent(1.0), minWidth: 0.0 },
-        actionsPanel: { display: "flex", flexDirection: "column", flex: 1, minWidth: 0.0, gap: 12.0 },
+        tabsCard: { display: "flex", flexDirection: "column", flex: context.viewport_width > 1000.0, width: gpui::Length::Percent(1.0), minWidth: 0.0, gap: 18.0 },
+        coffeeDrawing: { display: "flex", width: gpui::Length::from(gpui::px((context.viewport_width - if context.viewport_width <= 1000.0 { 28.0 } else { 56.0 }).clamp(0.0, 450.0))), minWidth: 0.0, flexShrink: 1 },
+        tabBar: { display: "flex", flexDirection: if context.viewport_width <= 480.0 { "column" } else { "row" }, width: gpui::Length::Percent(1.0), gap: 6.0, padding: 6.0, border: (1.0, rgba(59.0 / 255.0, 49.0 / 255.0, 40.0 / 255.0)), borderRadius: 14.0, backgroundColor: rgba(33.0 / 255.0, 28.0 / 255.0, 23.0 / 255.0) },
+        tabContent: { display: "flex", flexDirection: "column", width: gpui::Length::Percent(1.0), minWidth: 0.0 },
+        tabPanel: { display: "flex", flexDirection: "column", width: gpui::Length::Percent(1.0), minWidth: 0.0 },
+        actionsPanel: { display: "flex", flexDirection: "column", width: gpui::Length::Percent(1.0), minWidth: 0.0, gap: 12.0 },
         resetButton: { width: gpui::Length::from(gpui::px(142.0)), backgroundColor: rgba(62.0 / 255.0, 45.0 / 255.0, 32.0 / 255.0), color: rgba(246.0 / 255.0, 228.0 / 255.0, 207.0 / 255.0), borderRadius: 9.0, padding: (9.0, 14.0) }
     });
 

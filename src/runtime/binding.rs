@@ -759,13 +759,12 @@ fn compile_element(
     let mut children = Vec::new();
     for child in &element.children {
         match child {
-            TemplateNode::Text(text) if !text.trim().is_empty() => {
-                children.push(Node::Text(text.clone()))
-            }
+            // Spaces between interpolations are significant, and generated renderers
+            // address children by their template indices.
+            TemplateNode::Text(text) => children.push(Node::Text(text.clone())),
             TemplateNode::Element(child) => children.push(Node::Element(compile_element(
                 child, def, scope, path, controls, seen,
             )?)),
-            _ => {}
         }
     }
     Ok(Element {

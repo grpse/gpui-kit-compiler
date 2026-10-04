@@ -14,6 +14,12 @@ impl Node {
     }
     fn flex(self) -> Self { self }
     fn gap_2(self) -> Self { self }
+    fn pair(mut self, first: &str, second: &str) -> Self {
+        self.text.push_str(first); self.text.push_str(second); self
+    }
+    fn tuple(mut self, value: (&str, &str)) -> Self {
+        self.text.push_str(value.0); self.text.push_str(value.1); self
+    }
     fn children(mut self, children: impl Iterator<Item = Node>) -> Self {
         for child in children { self.text.push_str(&child.text); } self
     }
@@ -39,12 +45,23 @@ fn badge<T: std::fmt::Display>(value: T) -> Node {
     </kit::div>
 }
 struct View;
+fn early_node() -> Node {
+    let limit = 2;
+    assert!({1}<limit);
+    if true{return <Node args={("early", "early")} />;}
+    <kit::div />
+}
 impl View {
     fn render(&mut self) -> Node { <kit::div>{badge(7)}</kit::div> }
 }
 fn main() {
     assert_eq!(View.render().text, "01hello world as text7literal <tag> {braces}");
+    let node = <Node args={("multi", "")} pair:args={("a", "b")} tuple={("c", "d")}
+        pair:args={("e", "f")} flex:args={()} />;
+    assert_eq!(node.text, "abcdef");
+    assert_eq!(early_node().text, "early");
 }
+
 "##;
     let converted = gpui_rsc::convert_source(source).unwrap();
     assert!(converted.contains("fn badge<T: std::fmt::Display>(value: T) -> Node"));
@@ -116,9 +133,59 @@ fn malformed_tags_produce_conversion_errors() {
         ("fn f() { <div></span> }", "expected </div>"),
         ("fn f() { <div args={1} ctor={div()} /> }", "at most one"),
         ("fn f() { <div padding=8 /> }", "braces or a quoted string"),
+        (
+            "fn f() { <div item:args /> }",
+            "needs a Rust argument expression",
+        ),
+        (
+            "fn f() { <div item:unknown={1} /> }",
+            "not a Rust method name",
+        ),
         ("#[gpui] struct Broken;", "needs a body"),
     ] {
         let error = gpui_rsc::convert_source(source).unwrap_err();
         assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn markup_text_is_not_scanned_as_rust_comments_or_literals() {
+    let source = r#"
+#[gpui]
+pub fn links() -> Node {
+    <div content={|_| <div>https://example.com/User's profile</div>}>
+        <!-- An RSX comment with an unmatched "quote and } -->
+        https://gpui-kit.com/
+        User's profile
+    </div>
+}
+"#;
+    let converted = gpui_rsc::convert_source(source).unwrap();
+    assert!(converted.contains("https://example.com/User's profile"));
+    assert!(converted.contains("https://gpui-kit.com/ User's profile"));
+    assert!(!converted.contains("An RSX comment"));
+}
+
+#[test]
+fn interactive_example_views_convert_without_changing_their_rust_signatures() {
+    for (name, source) in [
+        (
+            "file browser",
+            include_str!("../examples/file-browser/src/ui.rsx"),
+        ),
+        (
+            "disk explorer",
+            include_str!("../examples/disk-explorer/src/ui.rsx"),
+        ),
+        (
+            "video editor",
+            include_str!("../examples/video-editor/src/ui.rsx"),
+        ),
+    ] {
+        let rust =
+            gpui_rsc::convert_source(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(!rust.contains("#[gpui]"), "{name}");
+        assert!(rust.contains("impl Render for"), "{name}");
+        assert!(rust.contains("-> impl IntoElement"), "{name}");
     }
 }

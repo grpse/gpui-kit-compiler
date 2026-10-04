@@ -1,7 +1,7 @@
 pub fn CoffeeProfile(acidity: f32, target_acidity: &mut f32, sweetness: f32, target_sweetness: &mut f32, bitterness: f32, target_bitterness: &mut f32, body: f32, target_body: &mut f32, clarity: f32, target_clarity: &mut f32, astringency: f32, target_astringency: &mut f32, intensity: f32, target_intensity: &mut f32, notes: &str, ratio: &str, extraction_signal: &str) -> gpui::AnyElement {
 let myStyles = styles({
     profileCard: {
-        display: "flex", flexDirection: "column", gap: if context.viewport_width <= 768.0 { 16.0 } else { 20.0 }, flex: 1,
+        display: "flex", flexDirection: "column", gap: if context.viewport_width <= 768.0 { 16.0 } else { 20.0 }, flexShrink: 0,
         width: gpui::Length::Percent(1.0), minWidth: 0.0,
         backgroundColor: rgba(249.0 / 255.0, 245.0 / 255.0, 239.0 / 255.0),
         textColor: rgba(45.0 / 255.0, 37.0 / 255.0, 31.0 / 255.0),

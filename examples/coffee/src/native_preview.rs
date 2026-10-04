@@ -123,8 +123,9 @@ fn render(
         .flex()
         .flex_col()
         .w_full()
-        .h_full()
-        .min_h(px(440.0))
+        .min_w_0()
+        .max_w(px(450.0))
+        .flex_shrink_0()
         .p(px(20.0))
         .gap(px(16.0))
         .rounded(px(18.0))
@@ -136,12 +137,16 @@ fn render(
             div()
                 .flex()
                 .justify_between()
+                .flex_wrap()
                 .items_start()
                 .gap(px(12.0))
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .min_w_0()
+                        .max_w_full()
+                        .flex_1()
                         .gap(px(5.0))
                         .child(
                             div()
@@ -176,8 +181,10 @@ fn render(
         )
         .child(
             div()
-                .flex_1()
-                .min_h(px(274.0))
+                .w_full()
+                .min_w_0()
+                .flex_shrink_0()
+                .p(px(6.0))
                 .rounded(px(14.0))
                 .border_1()
                 .border_color(rgb(0xd9c8b3))
@@ -188,23 +195,25 @@ fn render(
                 .child(
                     div()
                         .relative()
-                        .w(px(360.0))
-                        .h(px(260.0))
-                        .child(img(art.image).w(px(360.0)).h(px(260.0)))
+                        .w_full()
+                        .max_w(px(360.0))
+                        .aspect_ratio(360.0 / 260.0)
+                        .flex_shrink_0()
+                        .child(img(art.image).absolute().size_full().object_fit(ObjectFit::Contain))
                         .child(
                             div()
                                 .absolute()
-                                .left(px(art.drop_x))
-                                .top(px(art.drop_y))
-                                .w(px(6.0))
-                                .h(px(10.0))
+                                .left(relative(art.drop_x / 360.0))
+                                .top(relative(art.drop_y / 260.0))
+                                .w(relative(6.0 / 360.0))
+                                .h(relative(10.0 / 260.0))
                                 .rounded_full()
                                 .bg(brew_color)
                                 .with_animation(
                                     "extraction-flow",
                                     Animation::new(Duration::from_millis(1250)).repeat(),
                                     move |dot, phase| {
-                                        dot.top(px(art.drop_y + phase * art.drop_travel))
+                                        dot.top(relative((art.drop_y + phase * art.drop_travel) / 260.0))
                                             .opacity((1.0 - phase).max(0.08))
                                     },
                                 ),

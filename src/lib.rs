@@ -2297,17 +2297,42 @@ fn element_code(
         .join(",");
     let mut child_codes = Vec::new();
     let mut child_renders = Vec::new();
+    let mut text_run_start = None;
     for child in element.children() {
         match child.value() {
-            HtmlNode::Text(text) if !text.trim().is_empty() => {
-                let text = text.trim();
+            HtmlNode::Text(text) if !text.trim().is_empty() || text_run_start.is_some() => {
+                let content = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let text = if content.is_empty() {
+                    " ".to_owned()
+                } else {
+                    format!(
+                        "{}{}{}",
+                        if text.starts_with(char::is_whitespace) {
+                            " "
+                        } else {
+                            ""
+                        },
+                        content,
+                        if text.ends_with(char::is_whitespace) {
+                            " "
+                        } else {
+                            ""
+                        }
+                    )
+                };
+                text_run_start.get_or_insert(child_codes.len());
                 child_codes.push(format!("gpui_rsc::TemplateNode::Text({text:?}.into())"));
-                child_renders.push(format!("    container = container.child({text:?});\n"));
             }
             HtmlNode::Element(_) => {
                 let Some(child_element) = ElementRef::wrap(child) else {
                     continue;
                 };
+                let inline_value = child_element.value().name() == "rsc-value";
+                if inline_value {
+                    text_run_start.get_or_insert(child_codes.len());
+                } else if let Some(start) = text_run_start.take() {
+                    child_renders.push(format!("    container = container.child(view.inline_text(element, {start}, {}));\n", child_codes.len()));
+                }
                 let child_id = *next_style_id;
                 let code = element_code(
                     child_element,
@@ -2319,20 +2344,35 @@ fn element_code(
                 )?;
                 let child_index = child_codes.len();
                 child_codes.push(format!("gpui_rsc::TemplateNode::Element({code})"));
-                child_renders.push(format!(
-                    "    container = container.child(__rsc_render_{child_id}(view, view.child_element(element, {child_index}), props, viewport_width, window, cx));\n"
-                ));
+                if !inline_value {
+                    child_renders.push(format!(
+                        "    container = container.child(__rsc_render_{child_id}(view, view.child_element(element, {child_index}), props, viewport_width, window, cx));\n"
+                    ));
+                }
             }
             _ => {}
         }
     }
+    if let Some(start) = text_run_start {
+        child_renders.push(format!(
+            "    container = container.child(view.inline_text(element, {start}, {}));\n",
+            child_codes.len()
+        ));
+    }
     let children = child_codes.join(",");
     let render_name = format!("__rsc_render_{style_id}");
-    let mut render_body = "let mut container = div();\n".to_owned();
+    let mut render_body =
+        "let mut container = gpui_rsc::runtime::view::element_container();\n".to_owned();
+    if matches!(
+        element.value().name(),
+        "body" | "component" | "rsc-if" | "rsc-then" | "rsc-else"
+    ) {
+        render_body.push_str("container = container.w_full().flex().flex_col();\n");
+    }
     render_body.push_str(input_locals);
     if let Some(expression) = class_binding {
         render_body.push_str(
-            "    let style_context = gpui_rsc::runtime::StyleContext { viewport_width, props };\n    let context = &style_context;\n",
+            "    let style_context = gpui_rsc::runtime::StyleContext { viewport_width, viewport_height: view.content_height(window), props };\n    let context = &style_context;\n",
         );
         if let Some(root) = style_expression_root(expression) {
             if let Some(initializer) = style_variables.get(&root) {
@@ -2342,7 +2382,7 @@ fn element_code(
             }
         }
         render_body.push_str(&format!(
-            "    let bound_class_style: gpui_rsc::runtime::Style = {expression};\n    gpui::Refineable::refine(container.style(), &bound_class_style);\n"
+            "    let bound_class_style: gpui_rsc::runtime::Style = {expression};\n    if bound_class_style.position == Some(gpui::Position::Absolute) {{ container.style().max_size.width = None; }}\n    gpui::Refineable::refine(container.style(), &bound_class_style);\n"
         ));
     }
     let content = match element.value().name() {
@@ -2648,6 +2688,7 @@ fn style_property_call(name: &str, value: &str) -> Result<String, String> {
         "position" => {
             let position = parse_string_literal(value)?;
             method = match position.as_str() {
+                "static" => "position_static",
                 "relative" => "position_relative",
                 "absolute" => "position_absolute",
                 other => return Err(format!("unsupported position value {other:?}")),
@@ -2706,6 +2747,30 @@ fn style_property_call(name: &str, value: &str) -> Result<String, String> {
                 "text_color"
             };
             arguments = expand_style_color(value)?;
+        }
+        "white_space" => {
+            arguments = match parse_string_literal(value)?.as_str() {
+                "normal" => "gpui::WhiteSpace::Normal".into(),
+                "nowrap" => "gpui::WhiteSpace::Nowrap".into(),
+                other => return Err(format!("unsupported whiteSpace value {other:?}")),
+            };
+        }
+        "text_overflow" => {
+            arguments = match parse_string_literal(value)?.as_str() {
+                "clip" => "None".into(),
+                "ellipsis" => "Some(gpui::TextOverflow::Truncate(\"…\".into()))".into(),
+                other => return Err(format!("unsupported textOverflow value {other:?}")),
+            };
+        }
+        "font_style" => {
+            if let Ok(style) = parse_string_literal(value) {
+                arguments = match style.as_str() {
+                    "normal" => "gpui::FontStyle::Normal".into(),
+                    "italic" => "gpui::FontStyle::Italic".into(),
+                    "oblique" => "gpui::FontStyle::Oblique".into(),
+                    other => return Err(format!("unsupported fontStyle value {other:?}")),
+                };
+            }
         }
         "animation" => {
             return Err("animation is not currently supported in styles({...})".into());

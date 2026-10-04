@@ -1,5 +1,5 @@
-use gpui_rsc::runtime::{signal, Signal};
-use crate::generated::native::NativeBadge;
+use gpui_rsc::runtime::{signal, Signal, StyleContext};
+use crate::generated::native::{NativeBadge, VideoPanel};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_CAT: AtomicU64 = AtomicU64::new(1);
@@ -15,9 +15,15 @@ fn next_cat(cat: &Signal) {
     cat.set(cat_url(nonce));
 }
 
+fn tab_color(context: &StyleContext<'_>, tab: &str, channel: usize) -> f32 {
+    let active = context.props.get("active_tab").is_some_and(|value| value.text() == tab);
+    let color = if active { [69.0, 176.0, 158.0] } else { [59.0, 75.0, 89.0] };
+    color[channel] / 255.0
+}
+
 pub fn App() -> gpui::AnyElement {
     let cat = signal(cat_url(0));
-    let video = signal(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/demo.mp4"));
+    let active_tab = signal("video");
     let mediaStyles = styles({
         page: {
             width: gpui::Length::Percent(1.0), minWidth: 0.0,
@@ -41,7 +47,7 @@ pub fn App() -> gpui::AnyElement {
         intro: { display: "flex", flexDirection: "column", gap: 8.0 },
         cards: {
             display: "flex",
-            flexDirection: if context.viewport_width < 900.0 { "column" } else { "row" },
+            flexDirection: "row",
             gap: 20.0, width: gpui::Length::Percent(1.0), minWidth: 0.0
         },
         card: {
@@ -71,6 +77,14 @@ pub fn App() -> gpui::AnyElement {
             fontSize: 13.0, fontWeight: 700,
             padding: (11.0, 16.0), borderRadius: 10.0
         },
+        videoTab: {
+            padding: (11.0, 16.0), borderRadius: 10.0, fontWeight: 700,
+            backgroundColor: rgba(tab_color(context, "video", 0), tab_color(context, "video", 1), tab_color(context, "video", 2))
+        },
+        catsTab: {
+            padding: (11.0, 16.0), borderRadius: 10.0, fontWeight: 700,
+            backgroundColor: rgba(tab_color(context, "cats", 0), tab_color(context, "cats", 1), tab_color(context, "cats", 2))
+        },
         footer: {
             fontSize: 12.0,
             color: rgba(128.0 / 255.0, 148.0 / 255.0, 164.0 / 255.0)
@@ -85,14 +99,16 @@ pub fn App() -> gpui::AnyElement {
                 <div class={mediaStyles.subtitle}>Play a local video and load a new cat photo from the web.</div>
             </div>
             <div class={mediaStyles.cards}>
+                <button id="tab-video" on-click={active_tab.set("video")} class={mediaStyles.videoTab}>Video</button>
+                <button id="tab-cats" on-click={active_tab.set("cats")} class={mediaStyles.catsTab}>Cat Photos</button>
+            </div>
+            {if active_tab == "video" {
                 <div class={mediaStyles.card}>
-                    <div class={mediaStyles.cardHeader}>
-                        <div class={mediaStyles.label}>LOCAL MP4</div>
-                        <div class={mediaStyles.cardTitle}>Video player</div>
-                        <div class={mediaStyles.cardHint}>A bundled moving test clip. Use the player button to pause or resume.</div>
-                    </div>
-                    <video id="demo-video" src={video} width="480" height="270" object-fit="contain" autoplay controls muted loop class={mediaStyles.media}></video>
+                    <div class={mediaStyles.cardTitle}>Video player</div>
+                    <div class={mediaStyles.cardHint}>Choose a local video, then use the playback controls below.</div>
+                    <VideoPanel />
                 </div>
+            } else {
                 <div class={mediaStyles.card}>
                     <div class={mediaStyles.cardHeader}>
                         <div class={mediaStyles.label}>LIVE CAT PHOTO</div>
@@ -102,7 +118,7 @@ pub fn App() -> gpui::AnyElement {
                     <img id="cat-photo" src={cat} alt="Random cat from CATAAS" width="480" height="270" object-fit="cover" class={mediaStyles.media} />
                     <button id="next-cat" on-click={next_cat(&cat)} class={mediaStyles.action}>Show another cat</button>
                 </div>
-            </div>
+            }}
             <NativeBadge />
             <div class={mediaStyles.footer}>Video playback requires GStreamer. Cat photos require an internet connection.</div>
         </div>

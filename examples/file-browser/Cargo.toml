@@ -1,0 +1,12 @@
+[package]
+name = "rsx-file-browser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui-kit = "=0.7.0"
+chrono = "0.4"
+gpui-rsc = { path = "../..", default-features = false, features = ["runtime"] }
+
+[lib]
+path = "src/model.rs"
