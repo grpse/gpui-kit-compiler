@@ -1,0 +1,47 @@
+{
+  "source": "target/video-editor-proof/proof-media.mkv",
+  "source_checksum_algorithm": "FNV-1a 64 (integrity check, not cryptographic)",
+  "source_checksum_before": "daeccc80c3ad725a",
+  "source_checksum_after": "daeccc80c3ad725a",
+  "source_unchanged": true,
+  "video": [
+    {
+      "stream": 0,
+      "pixel_format": "YUV420P10LE",
+      "keyframes": 13
+    }
+  ],
+  "audio": [
+    {
+      "stream": 1,
+      "sample_rate": 48000,
+      "encoding": "32-bit PCM",
+      "channels": 2,
+      "samples": 288000
+    },
+    {
+      "stream": 2,
+      "sample_rate": 44100,
+      "encoding": "32-bit float PCM",
+      "channels": 1,
+      "samples": 265216
+    }
+  ],
+  "timeline_tracks": 4,
+  "video_regions": 2,
+  "linked_split_seconds": 2.0,
+  "inserted_gap_seconds": 1.0,
+  "audio_queue_frames": 8192,
+  "output_rate": 44100,
+  "device_frames_consumed": 309317,
+  "nonzero_device_frames": 265210,
+  "output_clipped_frames": 0,
+  "device_underrun_callbacks": 0,
+  "video_frames_presented": 150,
+  "video_clock_max_difference_ms": 10.628750428571365,
+  "video_clock_p95_difference_ms": 3.264651321995382,
+  "planned_end_seconds": 7.013968467712402,
+  "device_end_seconds": 7.013990929705215,
+  "last_observed_seconds": 7.012732857854876,
+  "monitor_wav": "target/video-editor-proof/multichannel/monitor-mix.wav"
+}

@@ -1,0 +1,395 @@
+{
+  "assets": [
+    {
+      "name": "skate_01.mp4",
+      "kind": "Video",
+      "duration": 12.0,
+      "size": 214000000,
+      "added": "Oct 4, 2026",
+      "crop": [
+        606.0,
+        105.0,
+        569.0,
+        349.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "mountain.mov",
+      "kind": "Video",
+      "duration": 28.0,
+      "size": 412000000,
+      "added": "Oct 4, 2026",
+      "crop": [
+        299.0,
+        173.0,
+        129.0,
+        62.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "person.mov",
+      "kind": "Video",
+      "duration": 18.0,
+      "size": 180000000,
+      "added": "Oct 4, 2026",
+      "crop": [
+        443.0,
+        173.0,
+        129.0,
+        62.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "ocean.mp4",
+      "kind": "Video",
+      "duration": 20.0,
+      "size": 293000000,
+      "added": "Oct 3, 2026",
+      "crop": [
+        153.0,
+        306.0,
+        130.0,
+        59.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "forest.mov",
+      "kind": "Video",
+      "duration": 14.0,
+      "size": 320000000,
+      "added": "Oct 3, 2026",
+      "crop": [
+        299.0,
+        306.0,
+        129.0,
+        59.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "city.mp4",
+      "kind": "Video",
+      "duration": 32.0,
+      "size": 450000000,
+      "added": "Oct 3, 2026",
+      "crop": [
+        443.0,
+        306.0,
+        129.0,
+        59.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "interior.mov",
+      "kind": "Video",
+      "duration": 22.0,
+      "size": 310000000,
+      "added": "Oct 2, 2026",
+      "crop": [
+        443.0,
+        441.0,
+        129.0,
+        60.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "road.mp4",
+      "kind": "Video",
+      "duration": 15.0,
+      "size": 210000000,
+      "added": "Oct 2, 2026",
+      "crop": [
+        299.0,
+        441.0,
+        129.0,
+        60.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "music.wav",
+      "kind": "Audio",
+      "duration": 225.0,
+      "size": 52000000,
+      "added": "Oct 4, 2026",
+      "crop": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "resolution": null,
+      "codec": "PCM",
+      "frame_rate": null
+    },
+    {
+      "name": "voiceover.wav",
+      "kind": "Audio",
+      "duration": 138.0,
+      "size": 32000000,
+      "added": "Oct 4, 2026",
+      "crop": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "resolution": null,
+      "codec": "PCM",
+      "frame_rate": null
+    },
+    {
+      "name": "sfx_whoosh.wav",
+      "kind": "Audio",
+      "duration": 15.0,
+      "size": 4000000,
+      "added": "Oct 3, 2026",
+      "crop": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "resolution": null,
+      "codec": "PCM",
+      "frame_rate": null
+    },
+    {
+      "name": "plant.mov",
+      "kind": "Video",
+      "duration": 10.0,
+      "size": 120000000,
+      "added": "Oct 1, 2026",
+      "crop": [
+        153.0,
+        441.0,
+        130.0,
+        60.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "H.264 / AAC",
+      "frame_rate": "59.94 fps"
+    },
+    {
+      "name": "landscape.jpg",
+      "kind": "Image",
+      "duration": 0.0,
+      "size": 8000000,
+      "added": "Oct 4, 2026",
+      "crop": [
+        299.0,
+        173.0,
+        129.0,
+        62.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "JPEG / PNG",
+      "frame_rate": null
+    },
+    {
+      "name": "botanical.png",
+      "kind": "Image",
+      "duration": 0.0,
+      "size": 6000000,
+      "added": "Oct 3, 2026",
+      "crop": [
+        153.0,
+        441.0,
+        130.0,
+        60.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "JPEG / PNG",
+      "frame_rate": null
+    },
+    {
+      "name": "city-cover.jpg",
+      "kind": "Image",
+      "duration": 0.0,
+      "size": 12000000,
+      "added": "Oct 3, 2026",
+      "crop": [
+        443.0,
+        306.0,
+        129.0,
+        59.0
+      ],
+      "resolution": [
+        3840,
+        2160
+      ],
+      "codec": "JPEG / PNG",
+      "frame_rate": null
+    }
+  ],
+  "jobs": [
+    [
+      0,
+      70
+    ],
+    [
+      1,
+      40
+    ],
+    [
+      2,
+      20
+    ],
+    [
+      3,
+      0
+    ]
+  ],
+  "tracks": [
+    [
+      "Video 1",
+      false
+    ],
+    [
+      "Video 2",
+      false
+    ],
+    [
+      "Music",
+      true
+    ],
+    [
+      "Voiceover",
+      true
+    ]
+  ],
+  "clips": [
+    [
+      0,
+      0,
+      0,
+      7.5
+    ],
+    [
+      1,
+      0,
+      7.5,
+      4
+    ],
+    [
+      2,
+      0,
+      14,
+      3.2
+    ],
+    [
+      4,
+      1,
+      7.5,
+      6.2
+    ],
+    [
+      8,
+      2,
+      0,
+      17.2
+    ],
+    [
+      9,
+      3,
+      0,
+      16.9
+    ]
+  ],
+  "folders": [
+    [
+      "Travel",
+      0
+    ],
+    [
+      "Projects",
+      0
+    ],
+    [
+      "House",
+      1
+    ],
+    [
+      "Documentary",
+      1
+    ],
+    [
+      "Ads",
+      1
+    ],
+    [
+      "SFX",
+      0
+    ],
+    [
+      "Music",
+      0
+    ],
+    [
+      "Stock",
+      0
+    ],
+    [
+      "Trash",
+      0
+    ]
+  ],
+  "position": 4.4,
+  "min_duration": 18,
+  "location_root": "/Projects/Travel"
+}

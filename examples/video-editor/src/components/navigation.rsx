@@ -20,15 +20,23 @@ pub fn sidebar(editor:&Editor,width:f32,cx:&mut Context<Editor>) -> impl IntoEle
             })} />
         {if library {
             <div flex flex-col flex-shrink-0 gap-1 mt-3 border-t-1 border-color={rgb(BORDER)} pt-3>
-                <div flex items-center justify-between px-2><div text-color={rgb(MUTED)}>Folders</div>{tool("add-folder","",Some(IconName::Plus),Action::Mock("Create folder"),false,cx)}</div>
-                <div flex flex-col gap-2 children={[("Travel",0),("Projects",0),("House",1),("Documentary",1),("Ads",1),("SFX",0),("Music",0),("Stock",0),("Trash",0)].into_iter().map(|(folder,indent)| {
+                <div flex items-center justify-between px-2><div text-color={rgb(MUTED)}>Folders</div>{tool("add-folder","",Some(IconName::Plus),Action::ImportFolder,false,cx)}</div>
+                <div flex flex-col gap-2 children={editor.state.mock_folders().into_iter().map(|(folder,indent)| {
                     let selected=editor.state.folder==folder;
                     <div pl={px(indent as f32*18.)}>
-                    <Button args={SharedString::from(format!("folder-{folder}"))} ghost justify-start w-full h={px(39.)} icon={if folder=="Trash"{IconName::Trash}else{IconName::Folder}} label={folder}
+                    <Button args={SharedString::from(format!("folder-{folder}"))} ghost justify-start w-full h={px(39.)} icon={if folder=="Trash"{IconName::Trash}else{IconName::Folder}} label={folder.clone()}
                     bg={rgb(if selected{0x26223f}else{PANEL})} text-color={rgb(if selected {0xb298ff}else{TEXT})} text-size={px(12.)}
-                    on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Folder(folder.into()),window,cx))} />
+                    on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Folder(folder.clone()),window,cx))} />
                     </div>
                     })} />
+                <div flex flex-col gap-2 children={editor.state.imported_folders().into_iter().map(|path| {
+                    let folder=path.display().to_string();
+                    let label=path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let selected=editor.state.folder==folder;
+                    <Button args={SharedString::from(format!("import-folder-{folder}"))} ghost justify-start w-full h={px(39.)} icon={IconName::FolderOpen} label={label} tooltip={folder.clone()}
+                        bg={rgb(if selected{0x26223f}else{PANEL})} text-size={px(12.)}
+                        on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Folder(folder.clone()),window,cx))} />
+                })} />
             </div>.into_any_element()
         } else {<div flex flex-col flex-shrink-0 mt={px(55.)} pt-3 border-t-1 border-color={rgb(BORDER)} gap-2>
                 {tool("projects","Projects",Some(IconName::Folder),Action::Project,false,cx)}

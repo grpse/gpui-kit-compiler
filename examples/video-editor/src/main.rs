@@ -1,8 +1,10 @@
 #[path = "../../support/mod.rs"]
 mod support;
-use rsx_video_editor::state;
+use rsx_video_editor::{preprocess, state};
 mod dock_skin;
 mod editor;
+mod graph_editor;
+mod interactions;
 mod workspace;
 mod generated {
     include!(concat!(
@@ -11,6 +13,47 @@ mod generated {
     ));
 }
 fn main() {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--prove-composition")
+    {
+        let result = arguments
+            .get(index + 1)
+            .ok_or_else(|| "Usage: --prove-composition NEW_OUTPUT_DIRECTORY".to_string())
+            .and_then(|path| rsx_video_editor::proof::run_composition(std::path::Path::new(path)));
+        match result {
+            Ok(path) => println!("Composition proof: {}", path.display()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--prove-playback")
+    {
+        let result = arguments
+            .get(index + 1)
+            .zip(arguments.get(index + 2))
+            .ok_or_else(|| "Usage: --prove-playback SOURCE OUTPUT_DIRECTORY".to_string())
+            .and_then(|(source, output)| {
+                rsx_video_editor::proof::run(
+                    std::path::Path::new(source),
+                    std::path::Path::new(output),
+                )
+            });
+        match result {
+            Ok(path) => println!("Playback proof: {}", path.display()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if std::env::args().any(|arg| arg == "--validate") {
         return;
     }

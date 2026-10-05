@@ -1,5 +1,6 @@
 use gpui_kit::{prelude::*, *};
 use gpui_base::{ResizeHandleContext,ResizeHandleState};
+use gpui_kit::component::{dock::{DragPanel,TabGroupContext},tab::{Tab,TabBar},Selectable as _};
 use crate::generated::primitives::*;
 
 /// Native resize handles own their nine-pixel grab band. These four-pixel insets
@@ -17,6 +18,33 @@ pub fn island_header(content:AnyElement)->impl IntoElement {
     <div flex-shrink-0 rounded-t-lg overflow-hidden border-1 border-color={rgb(BORDER)} bg={rgb(PANEL)}>
         {content}
     </div>
+}
+
+/// Keep the navigation tabs selectable and dockable without trailing controls.
+#[gpui]
+pub fn tools_tabs(group:&TabGroupContext,cx:&mut App)->impl IntoElement + use<> {
+    let tabs:Vec<_>=group.panels().iter().enumerate().filter(|(_,panel)|panel.visible(cx)).map(|(index,panel)| {
+        let title=panel.panel_name(cx);
+        let select=group.clone();
+        let drop=group.clone();
+        let drag=if group.is_draggable()&&!group.is_collapsed(){group.drag_panel(index,cx)}else{None};
+        <Tab selected={group.active_panel().is_some_and(|active|active.panel_id(cx)==panel.panel_id(cx))} on-click={move |_,window,cx|select.select_tab(index,window,cx)}
+            map={move |tab|tab.when_some(drag,|tab,drag|tab.on_drag(drag,move |drag,offset,_,cx| {
+                cx.stop_propagation();
+                drag.set_drag_offset(offset);
+                drag.set_preview_size(size(px(180.),px(32.)));
+                cx.new(|_|crate::dock_skin::ToolsTabPreview{title})
+            })).when(group.is_droppable(),|tab|tab.on_drop(move |drag:&DragPanel,window,cx|drop.drop_panel(drag.clone(),Some(index),true,window,cx)))} child={title} />
+    }).collect();
+    let drop=group.clone();
+    <TabBar args={"tools-tab-bar"} children={tabs}
+        last-empty-space={<div id="tools-tab-empty-space" h-full flex-1 min-w-0
+            on-drop={move |drag:&DragPanel,window,cx|drop.drop_panel(drag.clone(),None,true,window,cx)} />} />
+}
+
+#[gpui]
+pub fn tools_tab_preview(title:&'static str)->impl IntoElement {
+    <div px-3 py-2 bg={rgb(PANEL)} border-1 border-color={rgb(BORDER)} rounded-md>{title}</div>
 }
 #[gpui]
 pub fn island_body(frame:Stateful<Div>)->Stateful<Div> {

@@ -1,0 +1,46 @@
+[
+  {
+    "file": "murchison-falls.webm",
+    "title": "Rainbow over Murchison Falls National Park",
+    "author": "BMKME",
+    "license": "CC0-1.0",
+    "source_page": "https://commons.wikimedia.org/wiki/File:V8.webm",
+    "download_url": "https://upload.wikimedia.org/wikipedia/commons/a/a7/V8.webm",
+    "changes": "Original file, renamed.",
+    "bytes": 3145371,
+    "sha256": "c6a21a3a7619ca7fbcbc1b4d012d7098d18f599f0200f735d31cae15a4772dd1"
+  },
+  {
+    "file": "bell.wav",
+    "title": "Bell sound effect",
+    "author": "code4fukui / sound-cc0 contributors",
+    "license": "CC0-1.0",
+    "source_page": "https://github.com/code4fukui/sound-cc0",
+    "download_url": "https://raw.githubusercontent.com/code4fukui/sound-cc0/main/bell1.wav",
+    "changes": "Original file, renamed.",
+    "bytes": 1800108,
+    "sha256": "4af46c2751611d024a38855a8215f5d8d42962fcc5ec5c93ba1dba10b41fa7f7"
+  },
+  {
+    "file": "cracker-stereo.wav",
+    "title": "Stereo cracker sound effect",
+    "author": "code4fukui / sound-cc0 contributors",
+    "license": "CC0-1.0",
+    "source_page": "https://github.com/code4fukui/sound-cc0",
+    "download_url": "https://raw.githubusercontent.com/code4fukui/sound-cc0/main/cracker1v-stereo.wav",
+    "changes": "Original file, renamed.",
+    "bytes": 89560,
+    "sha256": "1a509516953cfb0f63654a3e597ddf8884a203bc661bc5bf47b32019483d6446"
+  },
+  {
+    "file": "piano-emo-10-excerpt.ogg",
+    "title": "Piano Emo 10",
+    "author": "Tozan",
+    "license": "CC0-1.0",
+    "source_page": "https://opengameart.org/content/piano-emo-10",
+    "download_url": "https://opengameart.org/sites/default/files/pianoemo10_0.ogg",
+    "changes": "First approximately 8 seconds, compressed Vorbis packets copied without re-encoding. Source: pianoemo10_0.ogg.",
+    "bytes": 102148,
+    "sha256": "17699557835d75b47b3d0f24aedf21857e15d78fbc97d8a6bb035c842d9d3144"
+  }
+]

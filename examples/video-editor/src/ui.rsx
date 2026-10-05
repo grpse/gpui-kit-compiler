@@ -1,5 +1,5 @@
 use gpui_kit::{prelude::*, *};
-use crate::{editor::Editor,state::Action,generated::primitives::*};
+use crate::{editor::Editor,state::{Action,Screen},generated::primitives::*};
 
 /// The application entry point. Native state can be adopted independently of RSX views.
 pub fn entry(window:&mut Window,cx:&mut App)->Entity<Editor> {
@@ -21,6 +21,8 @@ pub fn editor_view(editor: &Editor, window: &mut Window, cx: &mut Context<Editor
                 let width = f32::from(window.bounds().size.width);
                 let height = (f32::from(window.bounds().size.height) - 58.).max(100.);
                 crate::generated::player::player(editor,width, height, cx).into_any_element()
+            } else if editor.state.screen==Screen::Compositing {
+                crate::generated::compositing::compositing_view(editor,cx).into_any_element()
             } else {
                 workspace.into_any_element()
             }}

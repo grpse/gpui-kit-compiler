@@ -1,0 +1,40 @@
+{
+  "source": "examples/video-editor/assets/media/murchison-falls.webm",
+  "source_checksum_algorithm": "FNV-1a 64 (integrity check, not cryptographic)",
+  "source_checksum_before": "280daa8634777517",
+  "source_checksum_after": "280daa8634777517",
+  "source_unchanged": true,
+  "video": [
+    {
+      "stream": 0,
+      "pixel_format": "YUV420P",
+      "keyframes": 3
+    }
+  ],
+  "audio": [
+    {
+      "stream": 1,
+      "sample_rate": 48000,
+      "encoding": "32-bit float PCM",
+      "channels": 2,
+      "samples": 303104
+    }
+  ],
+  "timeline_tracks": 3,
+  "video_regions": 2,
+  "linked_split_seconds": 2.0,
+  "inserted_gap_seconds": 1.0,
+  "audio_queue_frames": 8192,
+  "output_rate": 44100,
+  "device_frames_consumed": 326341,
+  "nonzero_device_frames": 276181,
+  "output_clipped_frames": 0,
+  "device_underrun_callbacks": 0,
+  "video_frames_presented": 186,
+  "video_clock_max_difference_ms": 42.13682700906985,
+  "video_clock_p95_difference_ms": 3.3860505986398337,
+  "planned_end_seconds": 7.400000095367432,
+  "device_end_seconds": 7.400022675736961,
+  "last_observed_seconds": 7.398655401555556,
+  "monitor_wav": "target/video-editor-proof/bundled/monitor-mix.wav"
+}

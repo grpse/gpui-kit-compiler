@@ -1,17 +1,20 @@
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::{prelude::*, *};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{button::{Button,ButtonVariants as _},input::Input,checkbox::Checkbox,Sizable as _};
+use gpui_kit::component::{button::{Button,ButtonVariants as _},input::Input,menu::{ContextMenuExt as _,DropdownMenu as _},checkbox::Checkbox,Sizable as _};
 use crate::{editor::Editor,generated::primitives::*,state::{Action,Screen,Kind}};
 #[gpui]
 pub fn media_card(editor:&Editor,id:usize,width:f32,compact:bool,cx:&mut Context<Editor>) -> impl IntoElement + use<> {
+    let owner=cx.entity();
+    let menu_owner=owner.clone();
     let asset=&editor.state.assets[id];
     let selected=editor.state.selected==id;
     let height=if compact {width*0.65}else{width*0.59};
     <div flex flex-col w={px(width)} gap={px(7.)} flex-shrink-0>
-        <div id={("media-card",id)} role={Role::Button} aria-label={asset.name} relative w={px(width)} h={px(height)} rounded={px(7.)} overflow-hidden border={px(if selected {2.}else{1.})}
+        <div id={("media-card",id)} role={Role::Button} aria-label={asset.name.clone()} relative w={px(width)} h={px(height)} rounded={px(7.)} overflow-hidden border={px(if selected {2.}else{1.})}
             border-color={rgb(if selected {PURPLE}else{BORDER})} cursor-pointer
-            on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Select(id),window,cx))}>
+            on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Select(id),window,cx))}
+            context-menu={move |menu,window,cx|crate::interactions::media_menu(menu,menu_owner.clone(),id,window,cx)}>
             {thumbnail(asset,width,height)}
             {if !compact {<div id={("check-wrap",id)} absolute top={px(7.)} left={px(7.)} on-click={|_,_,cx|cx.stop_propagation()}>
                     <Checkbox args={SharedString::from(format!("select-{id}"))} checked={editor.state.checked.contains(&id)}
@@ -20,13 +23,13 @@ pub fn media_card(editor:&Editor,id:usize,width:f32,compact:bool,cx:&mut Context
             <div absolute bottom={px(4.)} left={px(4.)} flex items-center gap-1 px={px(5.)} py={px(2.)} bg={rgba(0x080c12de)} rounded={px(4.)} text-size={px(10.)}>
                 {glyph(if asset.kind==Kind::Audio{IconName::Music}else if asset.kind==Kind::Image{IconName::Image}else{IconName::Film},12.)}<div>{asset.duration_label()}</div>
             </div>
-            {if asset.kind!=Kind::Audio {<div absolute right={px(4.)} bottom={px(4.)} px={px(4.)} py={px(2.)} bg={rgba(0x080c12de)} rounded={px(3.)} text-size={px(10.)}>{if asset.kind==Kind::Image{"IMG"}else{"4K"}}</div>.into_any_element()}else{div().into_any_element()}}
+            {if asset.kind!=Kind::Audio {<div absolute right={px(4.)} bottom={px(4.)} px={px(4.)} py={px(2.)} bg={rgba(0x080c12de)} rounded={px(3.)} text-size={px(10.)}>{if asset.kind==Kind::Image{"IMG"}else if asset.resolution.is_some_and(|[w,h]|w>=3840||h>=2160){"4K"}else{"VIDEO"}}</div>.into_any_element()}else{div().into_any_element()}}
         </div>
         <div flex items-center justify-between text-size={px(if compact{11.}else{13.})}>
-            <div truncate>{asset.name}</div>
-            {if !compact {tool(format!("asset-menu-{id}"),"",Some(IconName::EllipsisVertical),Action::Mock("Media context menu"),false,cx).h(px(20.)).w(px(20.)).p(px(0.)).into_any_element()}else{div().into_any_element()}}
+            <div truncate>{asset.name.clone()}</div>
+            {if !compact {Button::new(SharedString::from(format!("asset-menu-{id}"))).ghost().small().icon(IconName::EllipsisVertical).h(px(20.)).w(px(20.)).p(px(0.)).dropdown_menu(move |menu,window,cx|crate::interactions::media_menu(menu,owner.clone(),id,window,cx)).into_any_element()}else{div().into_any_element()}}
         </div>
-        {if !compact {<div text-size={px(11.)} text-color={rgb(MUTED)}>{format!("{}  ·  {} MB",asset.added,asset.size)}</div>.into_any_element()}else{div().into_any_element()}}
+        {if !compact {<div text-size={px(11.)} text-color={rgb(MUTED)}>{format!("{}  ·  {}",asset.added,asset.size_label())}</div>.into_any_element()}else{div().into_any_element()}}
     </div>
 }
 
@@ -38,9 +41,7 @@ pub fn media_library(editor:&Editor,width:f32,_height:f32,compact:bool,cx:&mut C
     let columns=((available+12.)/if compact {120.}else{176.}).floor().clamp(1.,4.) as usize;
     let gap=if compact {12.}else{16.};
     let card_width=(available-gap*(columns-1) as f32)/columns as f32;
-    let mut assets=editor.state.visible_assets();
-    if editor.state.screen==Screen::Overview && editor.state.category=="All" {assets.retain(|&id|editor.state.assets[id].kind==Kind::Video && id!=6);}
-    if compact && editor.state.category=="All" {assets.retain(|&id|editor.state.assets[id].kind==Kind::Video);}
+    let assets=editor.state.visible_assets();
     if matches!(editor.state.category.as_str(),"Text"|"Effects"|"Transitions"|"Elements"|"Captions") {
         return crate::generated::presets::preset_browser(editor,width,cx).into_any_element();
     }
@@ -84,14 +85,23 @@ pub fn media_library(editor:&Editor,width:f32,_height:f32,compact:bool,cx:&mut C
                 {if !compact{tool("source-filter",if editor.state.source_filter{"MP4 ⌄"}else{"All Sources ⌄"},None,Action::SourceFilter,editor.state.source_filter,cx).into_any_element()}else{div().into_any_element()}}
                 {tool("clear-filters","Clear",None,Action::ClearFilters,false,cx)}
             </div>.into_any_element()}else{div().into_any_element()}}
+        <div flex flex-wrap items-center gap-2 flex-shrink-0>
+            {tool("import-files-real","Import files",Some(IconName::FileUp),Action::Import,false,cx)}
+            {tool("import-folder-real","Import folder",Some(IconName::FolderOpen),Action::ImportFolder,false,cx)}
+            {tool("add-to-timeline",format!("Add to timeline ({})",editor.state.checked.len()),Some(IconName::Plus),Action::AddToTimeline,false,cx)}
+            <div text-size={px(11.)} text-color={rgb(MUTED)}>{if editor.importing{"Importing…".into()}else{format!("{} item(s)",assets.len())}}</div>
+        </div>
         <div flex flex-col flex-shrink-0 gap={px(20.)} children={if editor.state.screen==Screen::Overview {Some(crate::generated::processing::import_overview(editor,available,cx).into_any_element())}else{None}}>
             {if assets.is_empty(){<div flex flex-col items-center justify-center gap-3 h={px(170.)} text-color={rgb(MUTED)}>
                     {glyph(IconName::Search,28.)}<div>No matching media</div>{tool("reset-search","Clear filters",None,Action::ClearFilters,false,cx)}
                 </div>.into_any_element()}else if editor.state.list && !compact {
                 <div flex flex-col flex-shrink-0 gap-2 children={assets.iter().map(|&id| {
                     let asset=&editor.state.assets[id];
-                    <div id={("asset-row",id)} role={Role::Button} aria-label={asset.name} flex items-center gap-4 p-2 bg={rgb(if editor.state.selected==id{0x26223f}else{RAISED})} rounded-md cursor-pointer on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Select(id),window,cx))}>
-                    {thumbnail(asset,72.,43.)}<div flex-1>{asset.name}</div><div text-color={rgb(MUTED)}>{asset.duration_label()}</div><div w={px(75.)}>{format!("{} MB",asset.size)}</div>
+                    let owner=cx.entity();
+                    <div id={("asset-row",id)} role={Role::Button} aria-label={asset.name.clone()} flex items-center gap-4 p-2 bg={rgb(if editor.state.selected==id{0x26223f}else{RAISED})} rounded-md cursor-pointer on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Select(id),window,cx))}
+                    context-menu={move |menu,window,cx|crate::interactions::media_menu(menu,owner.clone(),id,window,cx)}>
+                    <div id={("row-check",id)} on-click={|_,_,cx|cx.stop_propagation()}><Checkbox args={SharedString::from(format!("row-select-{id}"))} checked={editor.state.checked.contains(&id)} on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::MultiSelect(id),window,cx))} /></div>
+                    {thumbnail(asset,72.,43.)}<div flex-1>{asset.name.clone()}</div><div text-color={rgb(MUTED)}>{asset.duration_label()}</div><div w={px(75.)}>{asset.size_label()}</div>
                     </div>
                     })}></div>.into_any_element()
             }else{

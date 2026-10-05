@@ -38,7 +38,7 @@ pub fn video_inspector(editor:&Editor,cx:&mut Context<Editor>) -> impl IntoEleme
 #[gpui]
 pub fn inspector_panel(editor:&Editor,width:f32,_height:f32,cx:&mut Context<Editor>) -> impl IntoElement + use<> {
     <div flex flex-col w={px(width)} h-full flex-shrink-0 bg={rgb(PANEL)} border-1 border-color={rgb(BORDER)} rounded-lg overflow-hidden>
-        <div flex flex-wrap flex-shrink-0 border-b-1 border-color={rgb(BORDER)} children={["Video","Audio","Tracking","Effects","Color"].into_iter().enumerate().map(|(i,label)|
+        <div flex flex-wrap flex-shrink-0 border-b-1 border-color={rgb(BORDER)} children={["Video","Audio"].into_iter().enumerate().map(|(i,label)|
             <Button args={SharedString::from(format!("inspector-{i}"))} ghost small flex-1 label={label} px={px(4.)} h={px(44.)} text-size={px(11.)}
             bg={rgb(if editor.state.inspector==i{0x211b34}else{PANEL})} text-color={rgb(if editor.state.inspector==i{0xb298ff}else{TEXT})}
             border-b={px(if editor.state.inspector==i{2.}else{0.})} border-color={rgb(PURPLE)}
@@ -49,16 +49,10 @@ pub fn inspector_panel(editor:&Editor,width:f32,_height:f32,cx:&mut Context<Edit
                 {match editor.state.inspector {
                         0=>crate::generated::inspector::video_inspector(editor,cx).into_any_element(),
                         1=><div flex flex-col gap-3><div font-semibold>Audio</div>{crate::generated::properties::property_slider(editor,"Volume",8,"%",cx)}{crate::generated::properties::toggle_property(editor,"Normalize",cx)}{crate::generated::properties::toggle_property(editor,"Noise Reduction",cx)}
-                            {tool("audio-mute","Mute Clip",Some(IconName::VolumeX),Action::Mute,editor.state.muted,cx)}
+                            {if let Some(track)=editor.state.clips.get(editor.state.selected_clip).map(|clip|clip.track).filter(|&index|editor.state.screen.has_timeline()&&editor.state.tracks[index].audio) {tool("audio-mute","Mute track",Some(IconName::VolumeX),Action::TrackMuted(track),editor.state.tracks[track].muted,cx)}else{tool("audio-mute","Mute preview",Some(IconName::VolumeX),Action::Mute,editor.state.muted,cx)}}
                             {section_title("Fade",cx,false)}{tool("audio-fade","Add fade in / out",None,Action::Mock("Audio fade"),false,cx)}
                         </div>.into_any_element(),
-                        2=>crate::generated::tracking::tracking_inspector(editor,cx).into_any_element(),
-                        3=><div flex flex-col gap-3><div font-semibold>Effects</div><div text-color={rgb(MUTED)} text-size={px(12.)}>Choose a look for your clip</div>
-                            <div flex flex-col gap-2 children={["Cinematic","Soft Glow","Film Grain","Vignette"].into_iter().map(|label|<div flex items-center justify-between p-3 rounded-md bg={rgb(RAISED)}><div>{label}</div>{tool(format!("effect-{label}"),"Apply",Some(IconName::Plus),Action::Mock(label),false,cx)}</div>)} />
-                        </div>.into_any_element(),
-                        _=><div flex flex-col gap-3><div font-semibold>Color Correction</div>{crate::generated::properties::property_slider(editor,"Exposure",9,"",cx)}{crate::generated::properties::property_slider(editor,"Intensity",8,"%",cx)}{crate::generated::properties::toggle_property(editor,"Auto Color",cx)}
-                            {tool("color-lut","Choose LUT ⌄",None,Action::Mock("Color LUT menu"),false,cx)}
-                        </div>.into_any_element(),
+                        _=>crate::generated::inspector::video_inspector(editor,cx).into_any_element(),
                     }}
             </div>
         </div>

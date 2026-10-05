@@ -1,0 +1,96 @@
+{
+  "recorded_at_unix_seconds": 1791174144,
+  "backend": "native libavfilter through ffmpeg-next 9, no subprocess",
+  "source": "/Users/gilbertoribeiro/Projects/gpui-kit-compiler/examples/video-editor/assets/media/murchison-falls.webm",
+  "checksum_algorithm": "FNV-1a 64 (integrity check, not cryptographic)",
+  "source_checksum_before": "280daa8634777517",
+  "source_checksum_after": "280daa8634777517",
+  "source_unchanged": true,
+  "channel_cache_checksums_before": [
+    "d35fa8417a37943b",
+    "fa10d224c16d06fc"
+  ],
+  "channel_cache_checksums_after": [
+    "d35fa8417a37943b",
+    "fa10d224c16d06fc"
+  ],
+  "channel_caches_unchanged": true,
+  "source_time_seconds": 1.0,
+  "audio_duration_seconds": 2.0,
+  "render_seconds": 0.438807792,
+  "video": {
+    "width": 960,
+    "height": 540,
+    "pixel_format": "BGRA 8-bit preview",
+    "file": "target/composition-proof-final-2026-10-05/composite-frame.png"
+  },
+  "audio": {
+    "sample_rate": 48000,
+    "channels": 2,
+    "samples_per_channel": 96000,
+    "encoding": "32-bit float PCM",
+    "peak": 0.38158613443374634,
+    "file": "target/composition-proof-final-2026-10-05/composite-audio.wav"
+  },
+  "nodes": [
+    {
+      "id": 1,
+      "operation": "Media source",
+      "description": "Video stream 0",
+      "inputs": []
+    },
+    {
+      "id": 2,
+      "operation": "Color",
+      "description": "Saturation 0.00",
+      "inputs": [
+        8
+      ]
+    },
+    {
+      "id": 3,
+      "operation": "Video output",
+      "description": "Render one preview frame",
+      "inputs": [
+        2
+      ]
+    },
+    {
+      "id": 4,
+      "operation": "Media source",
+      "description": "Stream 1 · channel 1",
+      "inputs": []
+    },
+    {
+      "id": 5,
+      "operation": "Media source",
+      "description": "Stream 1 · channel 2",
+      "inputs": []
+    },
+    {
+      "id": 6,
+      "operation": "Audio mix",
+      "description": "Two inputs · normalized mix",
+      "inputs": [
+        4,
+        5
+      ]
+    },
+    {
+      "id": 7,
+      "operation": "Audio output",
+      "description": "Render stereo audio excerpt",
+      "inputs": [
+        6
+      ]
+    },
+    {
+      "id": 8,
+      "operation": "Horizontal flip",
+      "description": "Mirror horizontally",
+      "inputs": [
+        1
+      ]
+    }
+  ]
+}

@@ -1,3 +1,12 @@
+pub mod blender_catalog;
+pub mod blender_backend;
+pub mod catalog;
+pub mod compositing;
+pub mod composition;
+pub mod media;
+pub mod playback;
+pub mod preprocess;
+pub mod proof;
 pub mod state;
 
 use std::{
@@ -8,7 +17,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -74,11 +83,16 @@ pub struct Workspace {
 }
 impl Workspace {
     pub fn new() -> Result<Self, String> {
+        static NEXT_WORKSPACE: AtomicU64 = AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("rsx-video-{}-{nonce}", std::process::id()));
+        let sequence = NEXT_WORKSPACE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "rsx-video-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir(&path).map_err(|e| e.to_string())?;
         Ok(Self { path })
     }
@@ -112,7 +126,10 @@ impl Edit {
         if !matches!(self.rotation, 0 | 90 | 180 | 270) {
             return Err("Rotation must be 0, 90, 180 or 270 degrees.".into());
         }
-        if self.width.is_some_and(|w| !(2..=7680).contains(&w) || w % 2 != 0) {
+        if self
+            .width
+            .is_some_and(|w| !(2..=7680).contains(&w) || w % 2 != 0)
+        {
             return Err("Output width must be an even number between 2 and 7680.".into());
         }
         if self

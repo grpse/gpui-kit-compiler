@@ -7,6 +7,7 @@ use crate::{editor::Editor,generated::primitives::*,state::Action};
 
 
 #[gpui]
+#[allow(dead_code)] // Retained reference prototype; Inspector currently offers Audio and Video.
 pub fn tracking_inspector(editor:&Editor,cx:&mut Context<Editor>) -> impl IntoElement + use<> {
     <div flex flex-col gap={px(12.)}>
         <div font-semibold mt-2>Object Tracking</div>

@@ -75,8 +75,15 @@ impl TabGroupRenderer for IslandTabs {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        crate::generated::docking::island_header(self.inner.render_tab_bar(group, window, cx))
-            .into_any_element()
+        let content = if group
+            .active_panel()
+            .is_some_and(|panel| panel.panel_name(cx) == "Tools & folders")
+        {
+            crate::generated::docking::tools_tabs(group, cx).into_any_element()
+        } else {
+            self.inner.render_tab_bar(group, window, cx)
+        };
+        crate::generated::docking::island_header(content).into_any_element()
     }
     fn render_active_panel(
         &self,
@@ -102,5 +109,14 @@ impl TabGroupRenderer for IslandTabs {
         cx: &mut App,
     ) -> Option<AnyElement> {
         self.inner.render_empty(group, window, cx)
+    }
+}
+
+pub struct ToolsTabPreview {
+    pub title: &'static str,
+}
+impl Render for ToolsTabPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        crate::generated::docking::tools_tab_preview(self.title)
     }
 }

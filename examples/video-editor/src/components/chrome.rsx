@@ -16,7 +16,7 @@ pub fn topbar(editor:&Editor,cx:&mut Context<Editor>) -> impl IntoElement + use<
             on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Screen(screen),window,cx))} />)}>
         </div>
         <div flex-1 />
-        {if !editor.state.screen.has_timeline(){
+        {if !editor.state.screen.has_timeline() && editor.state.screen!=Screen::Compositing{
             <div w={px(260.)}>{<Input args={&editor.header_search} small prefix={glyph(IconName::Search,15.)} />}</div>.into_any_element()
         }else{div().into_any_element()}}
         {tool("reset-workspace","Reset layout",Some(IconName::PanelsTopLeft),Action::ResetWorkspace,false,cx)}
