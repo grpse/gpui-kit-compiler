@@ -45,7 +45,7 @@ pub struct NodeGesture {
 
 fn timeline_wheel_movement(delta: ScrollDelta, shift: bool, line_height: Pixels) -> Point<Pixels> {
     let delta = delta.pixel_delta(line_height);
-    if shift {
+    if shift || delta.x.abs() > delta.y.abs() {
         // macOS can already remap Shift+wheel onto the X axis.
         point(
             if delta.x.abs() > delta.y.abs() {
@@ -135,7 +135,7 @@ impl Editor {
     ) {
         let movement =
             timeline_wheel_movement(event.delta, event.modifiers.shift, window.line_height());
-        let handle = if event.modifiers.shift {
+        let handle = if event.modifiers.shift || !movement.x.is_zero() {
             &self.timeline_scroll
         } else {
             &self.timeline_vertical_scroll
@@ -1237,18 +1237,26 @@ mod scroll_tests {
     use gpui_kit::{ScrollDelta, point, px};
 
     #[test]
-    fn unmodified_trackpad_ignores_horizontal_motion() {
+    fn unmodified_trackpad_follows_the_gesture_axis() {
         assert_eq!(
             timeline_wheel_movement(
                 ScrollDelta::Pixels(point(px(-90.), px(-12.))),
                 false,
                 px(20.)
             ),
-            point(px(0.), px(-12.))
+            point(px(-90.), px(0.))
         );
         assert_eq!(
             timeline_wheel_movement(ScrollDelta::Pixels(point(px(-90.), px(0.))), false, px(20.)),
-            point(px(0.), px(0.))
+            point(px(-90.), px(0.))
+        );
+        assert_eq!(
+            timeline_wheel_movement(ScrollDelta::Pixels(point(px(2.), px(-60.))), false, px(20.)),
+            point(px(0.), px(-60.))
+        );
+        assert_eq!(
+            timeline_wheel_movement(ScrollDelta::Pixels(point(px(60.), px(0.))), false, px(20.)),
+            point(px(60.), px(0.))
         );
     }
 
@@ -1279,6 +1287,10 @@ mod scroll_tests {
         );
         assert_eq!(
             timeline_wheel_movement(delta, true, px(18.)),
+            point(px(-54.), px(0.))
+        );
+        assert_eq!(
+            timeline_wheel_movement(ScrollDelta::Lines(point(-3., 0.)), false, px(18.)),
             point(px(-54.), px(0.))
         );
     }

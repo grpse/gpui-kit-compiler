@@ -133,10 +133,12 @@ Verified in the native FlowCut Scroll QA preview with the real bundled project:
 
 - Wheel input over a video clip scrolls vertically to its audio channel tracks without moving clips horizontally.
 - Wheel input over a track mute button continues to the lower sound-effect and piano tracks; controls and clips stay vertically aligned.
-- At 120% zoom, unmodified horizontal scrolling over the piano clip leaves its horizontal position unchanged.
+- Initial behavior blocked unmodified horizontal input. The follow-up request enables sideways wheel/trackpad gestures on their dominant axis, while preserving vertical input and Shift+wheel.
 - Moving the pointer to the Inspector and scrolling moves the Inspector while the timeline retains its position, without a focus click.
 - The Tools & folders header has no expand or ellipsis buttons. Its tab still drags into the Media tab group, remains selectable, and shows only tabs when selected. Reset layout restores the separate card.
 
 Regression tests cover unmodified diagonal/horizontal pixel input, Shift with ordinary vertical deltas and macOS-remapped horizontal deltas, both directions, and line-height conversion for mouse wheels. The automation API cannot hold Shift during a wheel gesture; that combination is verified by the event-routing tests.
 
 Final verification: RSX generation and build pass; 63 library tests and three wheel-routing tests pass, with one opt-in legacy CLI test ignored. Clippy passes for all targets with warnings denied.
+
+Sideways-scroll follow-up: the three wheel-routing tests pass for horizontal and vertical gestures, diagonal drift, Shift remapping, both directions, and mouse-wheel line conversion. Build and Clippy pass. Native horizontal automation was inconclusive; event routing is covered by the regression tests.
