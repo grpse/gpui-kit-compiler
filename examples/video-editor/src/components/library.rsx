@@ -25,7 +25,7 @@ pub fn media_card(editor:&Editor,id:usize,width:f32,compact:bool,cx:&mut Context
             </div>
             {if asset.kind!=Kind::Audio {<div absolute right={px(4.)} bottom={px(4.)} px={px(4.)} py={px(2.)} bg={rgba(0x080c12de)} rounded={px(3.)} text-size={px(10.)}>{if asset.kind==Kind::Image{"IMG"}else if asset.resolution.is_some_and(|[w,h]|w>=3840||h>=2160){"4K"}else{"VIDEO"}}</div>.into_any_element()}else{div().into_any_element()}}
         </div>
-        <div flex items-center justify-between text-size={px(if compact{11.}else{13.})}>
+        <div flex items-center justify-start gap-2 text-size={px(if compact{11.}else{13.})}>
             <div truncate>{asset.name.clone()}</div>
             {if !compact {Button::new(SharedString::from(format!("asset-menu-{id}"))).ghost().small().icon(IconName::EllipsisVertical).h(px(20.)).w(px(20.)).p(px(0.)).dropdown_menu(move |menu,window,cx|crate::interactions::media_menu(menu,owner.clone(),id,window,cx)).into_any_element()}else{div().into_any_element()}}
         </div>
@@ -42,14 +42,11 @@ pub fn media_library(editor:&Editor,width:f32,_height:f32,compact:bool,cx:&mut C
     let gap=if compact {12.}else{16.};
     let card_width=(available-gap*(columns-1) as f32)/columns as f32;
     let assets=editor.state.visible_assets();
-    if matches!(editor.state.category.as_str(),"Text"|"Effects"|"Transitions"|"Elements"|"Captions") {
-        return crate::generated::presets::preset_browser(editor,width,cx).into_any_element();
-    }
     let title=match editor.state.category.as_str(){"Audio"=>"Audio Library","Images"=>"Image Library",_=>"Media Library"};
     let subtitle=match editor.state.category.as_str(){"Audio"=>"Music, voiceovers, and sound effects.","Images"=>"Still images and artwork for your project.",_=>"Import, preprocess, and manage all your media assets."};
     <div id="media-panel-scroll" track-scroll={&editor.media_scroll} flex flex-col size-full min-h-0 overflow-y-scroll overflow-x-scroll bg={rgb(PANEL)} border-1 border-color={rgb(BORDER)} rounded={px(if compact{8.}else{0.})} p={px(padding)} gap={px(if compact {8.}else{12.})}>
         <div flex flex-col flex-shrink-0 gap={px(8.)}>
-            <div flex flex-wrap items-center justify-between gap-2>
+            <div flex flex-wrap items-center justify-start gap-2>
                 <div text-size={px(if compact{19.}else{25.})} font-semibold>{title}</div>
                 {if compact||editor.state.screen==Screen::Overview {
                     tool("import-library",if compact{"Import ⌄"}else{"Import Media"},Some(IconName::FileUp),Action::Import,true,cx).into_any_element()
@@ -67,7 +64,6 @@ pub fn media_library(editor:&Editor,width:f32,_height:f32,compact:bool,cx:&mut C
                 <div flex flex-wrap items-center gap={px(5.)} border-b-1 border-color={rgb(BORDER)} children={["All","Videos","Audio","Images","Favorites"].into_iter().map(|category| <Button args={SharedString::from(format!("category-{category}"))} ghost small label={category}
                     px={px(if compact{6.}else{10.})} h={px(31.)} text-size={px(11.)} border-b={px(if editor.state.category==category {2.}else{0.})} border-color={rgb(PURPLE)}
                     on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Category(category.into()),window,cx))} />)}>
-                    <div flex-1 />
                     {if !compact {<div flex gap-2>
                             {tool("overview-sort",if editor.state.sort_ascending{"Name A–Z ⌄"}else{"Date Added ⌄"},None,Action::Sort,false,cx)}
                             {tool("overview-grid","",Some(IconName::LayoutGrid),Action::Layout(false),!editor.state.list,cx)}

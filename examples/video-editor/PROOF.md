@@ -142,3 +142,19 @@ Regression tests cover unmodified diagonal/horizontal pixel input, Shift with or
 Final verification: RSX generation and build pass; 63 library tests and three wheel-routing tests pass, with one opt-in legacy CLI test ignored. Clippy passes for all targets with warnings denied.
 
 Sideways-scroll follow-up: the three wheel-routing tests pass for horizontal and vertical gestures, diagonal drift, Shift remapping, both directions, and mouse-wheel line conversion. Build and Clippy pass. Native horizontal automation was inconclusive; event routing is covered by the regression tests.
+
+## Complete local editing workflow — 2026-10-05
+
+Runtime screenshot fixtures, simulated jobs and unfinished editing controls were removed. Normal startup is empty; `--demo` imports bundled real media. The processing panel reports native inspection, decoding/indexing, cache finalization, thumbnail generation and terminal success/error/cancellation. Action rows start at the left.
+
+The final FlowCut End to End QA build was exercised through native file dialogs:
+
+- Imported `murchison-falls.webm`; the actual waterfall preview, measured waveforms and one video plus two linked audio-channel tracks appeared. The processing panel reported one of one files ready.
+- Set timeline start to 0.2 seconds, source-in to 0.5 seconds and duration to 1.5 seconds. Undo restored the original range and Redo restored the trim.
+- Saved `target/flowcut-end-to-end-qa/project.flowcut`, reopened it and verified the Inspector retained those ranges with all three linked clips. The first save attempt exposed validation incorrectly rejecting negative recovery-span positions; the corrected build passed the native round trip and a regression test.
+- Exported the reopened project to `target/flowcut-end-to-end-qa/edited-final.mp4`. The panel reached Export complete and the native output file contained H.264 video and stereo AAC audio, including the initial black timeline gap.
+- Verified the compact processing dock shows its real status, and the top bar, library, transport and timeline actions begin at the left. Output files are ignored local QA artifacts.
+
+The final suite passes **69 library tests and three wheel-routing tests**, with one opt-in legacy CLI test ignored. RSX generation, native build, Clippy for all targets with warnings denied and whitespace checks pass. New tests cover truthful import stages and corrupt-source errors; project persistence, invalid/missing-source rejection and generated-media survival; and playable native MP4 export with source-in trims, gaps, mixed audio, still-image transparency, overlapping clips, visibility, cancellation and preservation of existing output files.
+
+Timeline movie export is functional. The saved compositor graph retains its separate single-frame/excerpt preview workflow; it is not continuously evaluated into the exported movie. This section supersedes earlier statements that project persistence, timeline undo/redo and timeline movie encoding remain pending.

@@ -718,6 +718,16 @@ pub fn prepare(
     root: &Path,
     cancel: Arc<AtomicBool>,
 ) -> Result<Arc<PreparedMedia>, String> {
+    prepare_with_progress(path, root, cancel, &mut |_| {})
+}
+pub fn prepare_with_progress(
+    path: &Path,
+    root: &Path,
+    cancel: Arc<AtomicBool>,
+    progress: &mut dyn FnMut(crate::processing::Update),
+) -> Result<Arc<PreparedMedia>, String> {
+    use crate::processing::{Stage, Update};
+    progress(Update::new(path, Stage::Inspecting, None));
     crate::media::initialize()?;
     let fingerprint = SourceFingerprint::read(path)?;
     static NEXT_CACHE: AtomicU64 = AtomicU64::new(0);
@@ -823,6 +833,8 @@ pub fn prepare(
     if videos.is_empty() && audio.is_empty() {
         return Err("No video or audio streams".into());
     }
+    let mut last_percent = None;
+    progress(Update::new(path, Stage::Decoding, Some(0)));
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err("Preprocessing cancelled".into());
@@ -832,6 +844,13 @@ pub fn prepare(
             Ok(()) => {}
             Err(ffmpeg::Error::Eof) => break,
             Err(error) => return Err(error.to_string()),
+        }
+        let percent = (packet.position() >= 0 && fingerprint.bytes > 0).then(|| {
+            ((packet.position() as u64).saturating_mul(100) / fingerprint.bytes).min(99) as u8
+        });
+        if percent != last_percent {
+            progress(Update::new(path, Stage::Decoding, percent));
+            last_percent = percent;
         }
         if let Some((is_audio, index)) = routing[packet.stream()] {
             if is_audio {
@@ -852,6 +871,7 @@ pub fn prepare(
             }
         }
     }
+    progress(Update::new(path, Stage::Finalizing, None));
     for processor in &mut audio {
         processor.decoder.send_eof().map_err(|e| e.to_string())?;
         processor.receive(&cancel)?;

@@ -1,3 +1,4 @@
+use gpui_base::Disableable as _;
 use gpui_kit::{prelude::*, *};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{menu::ContextMenuExt as _,input::Input,button::{Button,ButtonVariants as _},Sizable as _};
@@ -29,7 +30,7 @@ pub fn timeline_clip(editor:&Editor,index:usize,pixels_per_second:f32,cx:&mut Co
             if event.click_count()>=2 {this.begin_inline(InlineEdit::Clip(index),window,cx);}else{this.dispatch(Action::SelectClip(index),window,cx);}
         })}
         context-menu={move |menu,window,cx|crate::interactions::clip_menu(menu,owner.clone(),index,window,cx)}>
-        {if let Some((audio,channel))=channel {<div absolute left-0 bottom-0 opacity={0.8}>{channel_waveform(audio,channel,clip.source_start as f64,(clip.source_start+clip.length) as f64,width,35.,color)}</div>.into_any_element()}else if audio {<div absolute left-0 bottom-0 opacity={0.8}>{waveform(width,35.,color,clip.asset)}</div>.into_any_element()}else {
+        {if let Some((audio,channel))=channel {<div absolute left-0 bottom-0 opacity={0.8}>{channel_waveform(audio,channel,clip.source_start as f64,(clip.source_start+clip.length) as f64,width,35.,color)}</div>.into_any_element()}else if audio {div().into_any_element()}else {
             let frames=((width/75.).ceil() as usize).min(128);
             <div flex opacity={if editor.state.tracks[clip.track].visible{1.}else{0.35}} children={(0..frames).map(|_|photo(asset,75.,52.))}></div>.into_any_element()
         }}
@@ -37,7 +38,7 @@ pub fn timeline_clip(editor:&Editor,index:usize,pixels_per_second:f32,cx:&mut Co
             {glyph(if audio{IconName::Music}else{IconName::Film},12.)}
             {if editing {<div flex-1 min-w-0>{crate::generated::tracks::name_field(editor,cx)}</div>.into_any_element()}else{<div truncate>{label.clone()}</div>.into_any_element()}}
         </div>
-        {if asset.path.is_none()&&asset.name=="voiceover.wav"{automation_curve(width,50.).into_any_element()}else{div().into_any_element()}}
+
         {if unlocked&&!editing {<div absolute inset-0 children={[(ClipDragKind::Start,"start"),(ClipDragKind::End,"end")].into_iter().map(|(kind,edge)| {
             <div id={(if kind==ClipDragKind::Start{"clip-start-handle"}else{"clip-end-handle"},index)} role={Role::Slider} aria-label={format!("Trim {edge} of {label}")}
                 absolute top-0 bottom-0 left={if kind==ClipDragKind::Start{px(0.)}else{px((width-7.).max(0.))}} w={px(width.clamp(1.,7.))}
@@ -96,7 +97,9 @@ pub fn timeline(editor:&Editor,width:f32,cx:&mut Context<Editor>) -> impl IntoEl
         <div id="timeline-zoom-toolbar" flex items-center overflow-x-scroll px={px(16.)} h={px(38.)} flex-shrink-0 gap={px(7.)} border-b-1 border-color={rgb(BORDER)}
             context-menu={move |menu,window,cx|crate::interactions::timeline_menu(menu,toolbar_menu_owner.clone(),window,cx)}>
             {if editor.clip_gesture.is_some(){editor.state.clips.get(editor.state.selected_clip).map(|clip|<div text-size={px(11.)} text-color={rgb(TEXT)}>{format!("{:.3}s – {:.3}s",clip.start,clip.start+clip.length)}</div>.into_any_element()).unwrap_or_else(||div().into_any_element())}else{div().into_any_element()}}
-            <div flex-1 />{tool("zoom-out","",Some(IconName::Minus),Action::Zoom(-0.2),false,cx)}
+            {tool("timeline-undo","Undo",None,Action::Undo,false,cx).disabled(editor.history.is_empty())}
+            {tool("timeline-redo","Redo",None,Action::Redo,false,cx).disabled(editor.future.is_empty())}
+            {tool("zoom-out","",Some(IconName::Minus),Action::Zoom(-0.2),false,cx)}
             <div id="timeline-zoom-control" w={px(100.)} flex-shrink-0 role={Role::Slider} aria-label="Timeline zoom"><gpui_kit::component::slider::Slider args={&editor.timeline_zoom} /></div>
             <div w={px(42.)} text-size={px(11.)}>{format!("{:.0}%",editor.state.zoom*100.)}</div>
             {tool("zoom-in","",Some(IconName::Plus),Action::Zoom(0.2),false,cx)}
@@ -158,19 +161,6 @@ pub fn timeline(editor:&Editor,width:f32,cx:&mut Context<Editor>) -> impl IntoEl
             </div>
         </div>
     </div>
-}
-
-/// Native painting is embedded directly in RSX for a connected automation path.
-#[gpui]
-fn automation_curve(width:f32,height:f32) -> impl IntoElement + use<> {
-<canvas args={(|_,_,_|(), move |bounds,_,window,_| {
-    let points=[(0.,0.88),(0.12,0.5),(0.23,0.79),(0.47,0.52),(0.61,0.85),(0.83,0.47),(1.,0.88)];
-    let mut path=PathBuilder::stroke(px(1.5));
-    for (i,(x,y)) in points.iter().enumerate(){let p=point(bounds.origin.x+px(x*width),bounds.origin.y+px(y*height));if i==0{path.move_to(p);}else{path.line_to(p);}}
-    if let Ok(path)=path.build(){window.paint_path(path,rgb(GREEN));}
-    for (x,y) in points {window.paint_quad(fill(Bounds::new(point(bounds.origin.x+px(x*width-2.),bounds.origin.y+px(y*height-2.)),size(px(4.),px(4.))),rgb(GREEN)));}
-    })} absolute left-0 top-0 w={px(width)} h={px(height)} />
-
 }
 
 #[gpui]

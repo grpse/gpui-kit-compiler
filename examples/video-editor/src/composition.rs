@@ -93,7 +93,7 @@ impl Category {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Operation {
     Blender {
         kind: usize,
@@ -500,7 +500,7 @@ impl Operation {
         })
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub id: NodeId,
     pub operation: Operation,
@@ -580,7 +580,7 @@ impl Node {
                 * PORT_SPACING
     }
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Composition {
     pub nodes: Vec<Node>,
     pub selected: Option<NodeId>,
@@ -590,6 +590,47 @@ pub struct Composition {
     next_id: NodeId,
 }
 impl Composition {
+    pub fn validate_project(&mut self, assets: usize) -> Result<(), String> {
+        if self.nodes.len() > MAX_NODES {
+            return Err("Too many composition nodes".into());
+        }
+        let ids: BTreeSet<_> = self.nodes.iter().map(|node| node.id).collect();
+        if ids.len() != self.nodes.len() {
+            return Err("Duplicate composition node IDs".into());
+        }
+        for node in &self.nodes {
+            if !node.position.iter().all(|v| v.is_finite())
+                || node.inputs.iter().flatten().any(|id| !ids.contains(id))
+                || node.frame.is_some_and(|id| !ids.contains(&id))
+            {
+                return Err("Invalid composition references".into());
+            }
+            match &node.operation {
+                Operation::Source { asset, .. } if *asset >= assets => {
+                    return Err("Missing composition source".into());
+                }
+                Operation::Blender { kind, .. }
+                    if *kind >= crate::blender_catalog::catalog().nodes.len() =>
+                {
+                    return Err("Unknown composition node".into());
+                }
+                _ => {}
+            }
+            if node.inputs.len() != node.operation.inputs()
+                || node.input_ports.len() != node.inputs.len()
+            {
+                return Err("Invalid composition sockets".into());
+            }
+        }
+        self.next_id = ids.last().copied().unwrap_or(0);
+        if self.next_id == u64::MAX {
+            return Err("Invalid composition IDs".into());
+        }
+        self.pending = None;
+        self.selected = self.selected.filter(|id| ids.contains(id));
+        Ok(())
+    }
+
     pub fn node(&self, id: NodeId) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
     }

@@ -21,7 +21,7 @@ impl WorkspaceCard {
     fn title(self) -> &'static str {
         match self {
             Self::Navigation => "Tools & folders",
-            Self::Library => "Media & presets",
+            Self::Library => "Media library",
             Self::Preview => "Preview player",
             Self::Inspector => "Inspector",
             Self::Timeline => "Timeline",

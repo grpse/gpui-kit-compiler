@@ -38,31 +38,7 @@ pub fn photo(asset: &Asset, width: f32, height: f32) -> impl IntoElement + use<>
     if let Some(path)=&asset.poster {
         return <img args={path.clone()} w={px(width)} h={px(height)} flex-shrink-0 object-fit={ObjectFit::Contain} bg={rgb(RAISED)} />.into_any_element();
     }
-    if asset.path.is_some() {
-        return <div flex items-center justify-center w={px(width)} h={px(height)} flex-shrink-0 bg={rgb(RAISED)} text-color={rgb(MUTED)}>{glyph(if asset.kind==Kind::Video{IconName::Film}else if asset.kind==Kind::Audio{IconName::Music}else{IconName::Image},24.)}</div>.into_any_element();
-    }
-    let [x,y,w,h]=asset.crop;
-    let source="compositing-editing.png";
-    let scale=(width/w).max(height/h);
-    let path=std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/mocks").join(source);
-    <div relative w={px(width)} h={px(height)} flex-shrink-0 overflow-hidden bg={rgb(RAISED)}>
-        <img args={path} absolute left={px(-x*scale-(w*scale-width)/2.)} top={px(-y*scale-(h*scale-height)/2.)}
-            w={px(1536.*scale)} h={px(1024.*scale)} object-fit={ObjectFit::Fill} />
-    </div>.into_any_element()
-}
-
-#[gpui]
-pub fn waveform(width: f32, height: f32, color: u32, seed: usize) -> impl IntoElement + use<> {
-    let count=(width/3.).max(12.) as usize;
-    <div relative flex items-center w={px(width)} h={px(height)} overflow-hidden children={ (0..count).map(|i| {
-        let t=i as f32/count as f32;
-        let noise=((i*37+seed*19)%53) as f32/53.;
-        let envelope=(t*19.+seed as f32).sin().abs()*0.45+0.12;
-        let amplitude=(envelope*(0.25+noise)*height).max(2.);
-        <div flex-shrink-0 w={px(width/count as f32)} h={px(amplitude)} bg={rgb(color)} />
-        }) }>
-        <div absolute left-0 right-0 top={relative(0.5)} h={px(1.)} bg={rgb(color)} />
-    </div>
+    <div flex items-center justify-center w={px(width)} h={px(height)} flex-shrink-0 bg={rgb(RAISED)} text-color={rgb(MUTED)}>{glyph(if asset.kind==Kind::Video{IconName::Film}else if asset.kind==Kind::Audio{IconName::Music}else{IconName::Image},24.)}</div>.into_any_element()
 }
 
 /// Paint only the requested channel's measured min/max envelope, at bounded pixel resolution.
@@ -85,9 +61,6 @@ pub fn thumbnail(asset: &Asset, width: f32, height: f32) -> AnyElement {
         if let Some(audio)=asset.prepared.as_ref().and_then(|media|media.audio.first()) {
             <div flex items-center bg={rgb(0x102b29)}>{channel_waveform(audio,0,0.,audio.duration(),width,height*0.8,GREEN)}</div>.into_any_element()
         }else{photo(asset,width,height).into_any_element()}
-    } else if asset.kind==Kind::Audio {
-        let color=if asset.name=="voiceover.wav" {GREEN} else if asset.name=="music.wav" {PURPLE} else {MUTED};
-        <div flex items-center w={px(width)} h={px(height)} bg={rgb(if color==GREEN {0x102b29} else {0x1b1830})}>{waveform(width,height*0.8,color,asset.name.len())}</div>.into_any_element()
     } else {photo(asset,width,height).into_any_element()}
 }
 
@@ -95,13 +68,6 @@ pub fn thumbnail(asset: &Asset, width: f32, height: f32) -> AnyElement {
 pub fn meter(progress: f32, color: u32, height: f32) -> impl IntoElement + use<> {
     <div relative w-full h={px(height)} bg={rgb(0x343c4a)} rounded-full overflow-hidden>
         <div absolute left-0 top-0 h-full w={relative(progress.clamp(0.,1.))} bg={rgb(color)} rounded-full />
-    </div>
-}
-
-#[gpui]
-pub fn section_title(title: &'static str, cx: &mut Context<Editor>, collapsed: bool) -> impl IntoElement + use<> {
-    <div flex items-center gap-2 h={px(39.)}>
-        {tool(format!("section-{title}"),title,Some(if collapsed {IconName::ChevronRight}else{IconName::ChevronDown}),Action::Section(title),false,cx)}
     </div>
 }
 

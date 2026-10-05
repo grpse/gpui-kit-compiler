@@ -618,7 +618,7 @@ impl Editor {
         cx.notify();
     }
     pub fn render_composition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.graph_rendering {
+        if self.graph_rendering || self.importing {
             return;
         }
         let time = self.graph_time.read(cx).value().trim().parse::<f64>();

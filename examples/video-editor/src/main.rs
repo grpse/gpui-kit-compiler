@@ -3,6 +3,7 @@ mod support;
 use rsx_video_editor::{preprocess, state};
 mod dock_skin;
 mod editor;
+mod editor_operations;
 mod graph_editor;
 mod interactions;
 mod workspace;

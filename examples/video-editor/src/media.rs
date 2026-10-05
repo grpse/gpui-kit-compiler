@@ -53,7 +53,7 @@ impl VideoFrame {
     }
 }
 
-struct Decoder {
+pub(crate) struct Decoder {
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::context::Context>,
@@ -65,6 +65,7 @@ struct Decoder {
     fps: f64,
     draining: bool,
     fallback_time: f64,
+    pub(crate) max_dimensions: [u32; 2],
 }
 /// Bounded source-frame decoding for the compositing worker.
 pub fn composite_frame(path: &Path, stream: usize, position: f64) -> Result<VideoFrame, String> {
@@ -79,7 +80,7 @@ impl Decoder {
     fn open(path: &Path, cancel: Arc<AtomicBool>) -> Result<Self, String> {
         Self::open_stream(path, cancel, None)
     }
-    fn open_stream(
+    pub(crate) fn open_stream(
         path: &Path,
         cancel: Arc<AtomicBool>,
         stream_index: Option<usize>,
@@ -136,9 +137,10 @@ impl Decoder {
             fps,
             draining: false,
             fallback_time: 0.,
+            max_dimensions: [PREVIEW_WIDTH, PREVIEW_HEIGHT],
         })
     }
-    fn seek(&mut self, position: f64) -> Result<(), String> {
+    pub(crate) fn seek(&mut self, position: f64) -> Result<(), String> {
         let timestamp = ((position + self.origin) * ffmpeg::ffi::AV_TIME_BASE as f64) as i64;
         self.input
             .seek(timestamp, ..timestamp)
@@ -148,7 +150,7 @@ impl Decoder {
         self.fallback_time = position;
         Ok(())
     }
-    fn next(
+    pub(crate) fn next(
         &mut self,
         cancel: &AtomicBool,
         minimum_timestamp: f64,
@@ -176,8 +178,8 @@ impl Decoder {
                         return Err("Invalid frame dimensions".into());
                     }
                     if self.scale_source != Some(source) {
-                        let scale = (PREVIEW_WIDTH as f64 / source.1 as f64)
-                            .min(PREVIEW_HEIGHT as f64 / source.2 as f64)
+                        let scale = (self.max_dimensions[0] as f64 / source.1 as f64)
+                            .min(self.max_dimensions[1] as f64 / source.2 as f64)
                             .min(1.);
                         let width = (source.1 as f64 * scale).round().max(1.) as u32;
                         let height = (source.2 as f64 * scale).round().max(1.) as u32;
@@ -244,8 +246,21 @@ pub fn inspect(
     cache: Option<&Path>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    inspect_with_progress(asset, cache, cancel, &mut |_| {})
+}
+pub fn inspect_with_progress(
+    asset: &mut Asset,
+    cache: Option<&Path>,
+    cancel: Arc<AtomicBool>,
+    progress: &mut dyn FnMut(crate::processing::Update),
+) -> Result<(), String> {
     let path = asset.path.as_deref().ok_or("Missing source path")?;
     if asset.kind == Kind::Image {
+        progress(crate::processing::Update::new(
+            path,
+            crate::processing::Stage::Inspecting,
+            None,
+        ));
         let (width, height) = image::image_dimensions(path).map_err(|e| e.to_string())?;
         asset.resolution = Some([width, height]);
         asset.poster = Some(path.to_owned());
@@ -255,7 +270,7 @@ pub fn inspect(
         return Ok(());
     }
     let cache = cache.ok_or("Cannot preprocess media without a writable cache directory")?;
-    let prepared = crate::preprocess::prepare(path, cache, cancel.clone())?;
+    let prepared = crate::preprocess::prepare_with_progress(path, cache, cancel.clone(), progress)?;
     if let Some(video) = prepared
         .videos
         .iter()
@@ -276,6 +291,11 @@ pub fn inspect(
                 video.frame_rate[0] as f64 / video.frame_rate[1] as f64
             ));
         }
+        progress(crate::processing::Update::new(
+            path,
+            crate::processing::Stage::Thumbnail,
+            None,
+        ));
         let mut decoder = Decoder::open(path, cancel.clone())?;
         if asset.duration <= 0. && decoder.duration.is_finite() {
             asset.duration = decoder.duration.max(0.) as f32;

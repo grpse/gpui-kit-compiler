@@ -26,12 +26,15 @@ fn timeline_commands(
     cx: &Context<PopupMenu>,
 ) -> PopupMenu {
     menu = menu.separator();
-    for (label, command) in [("Add marker", "Marker"), ("Undo", "Undo"), ("Redo", "Redo")] {
+    for (label, action, disabled) in [
+        ("Undo", Action::Undo, owner.read(cx).history.is_empty()),
+        ("Redo", Action::Redo, owner.read(cx).future.is_empty()),
+    ] {
         menu = menu.item(item(
             owner,
             label,
-            false,
-            Box::new(move |editor, window, cx| editor.dispatch(Action::Tool(command), window, cx)),
+            disabled,
+            Box::new(move |editor, window, cx| editor.dispatch(action.clone(), window, cx)),
         ));
     }
     menu.item(item(
@@ -85,7 +88,7 @@ pub fn clip_menu(
     let split_disabled =
         locked || state.position <= clip.start || state.position >= clip.start + clip.length;
     let reveal_disabled = state.assets[clip.asset].path.is_none();
-    let mut menu = menu
+    let menu = menu
         .item(item(
             &owner,
             "Rename clip…",
@@ -142,17 +145,6 @@ pub fn clip_menu(
             }),
         ))
         .separator();
-    for command in ["Ripple", "Speed", "Crop", "Audio", "Fade"] {
-        menu = menu.item(item(
-            &owner,
-            command,
-            locked,
-            Box::new(move |editor, window, cx| {
-                editor.dispatch(Action::TargetClip(index), window, cx);
-                editor.dispatch(Action::Tool(command), window, cx);
-            }),
-        ));
-    }
     let menu = menu.separator().item(item(
         &owner,
         "Show source in Finder",

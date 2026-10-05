@@ -105,6 +105,15 @@ pub struct Editor {
     pub timeline_focus: FocusHandle,
     pub media_scroll: ScrollHandle,
     pub preset_scroll: ScrollHandle,
+    pub history: Vec<rsx_video_editor::project::Timeline>,
+    pub future: Vec<rsx_video_editor::project::Timeline>,
+    pub processing: Vec<rsx_video_editor::processing::Update>,
+    pub exporting: bool,
+    pub export_cancel: Arc<AtomicBool>,
+    pub export_progress: Option<rsx_video_editor::export::Progress>,
+    pub export_path: Option<PathBuf>,
+    pub project_path: Option<PathBuf>,
+    pub preview_still: Option<PathBuf>,
     pub importing: bool,
     pub import_cancel: Arc<AtomicBool>,
     pub cache: Option<Arc<Workspace>>,
@@ -122,6 +131,7 @@ pub struct Editor {
 }
 impl Drop for Editor {
     fn drop(&mut self) {
+        self.export_cancel.store(true, Ordering::Relaxed);
         self.import_cancel.store(true, Ordering::Relaxed);
         self.output_worker.pause();
     }
@@ -154,15 +164,11 @@ impl Editor {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut state = if std::env::args().any(|arg| arg == "--mock") {
-            EditorState::mock()
-        } else {
-            EditorState::default()
-        };
+        let mut state = EditorState::default();
         if let Some(screen) = std::env::args().find_map(|arg| match arg.as_str() {
             "--library" => Some(Screen::Library),
             "--overview" => Some(Screen::Overview),
-            "--tracking" => Some(Screen::Tracking),
+
             "--compositing" => Some(Screen::Compositing),
             _ => None,
         }) {
@@ -481,6 +487,15 @@ impl Editor {
             timeline_focus: cx.focus_handle(),
             media_scroll: ScrollHandle::new(),
             preset_scroll: ScrollHandle::new(),
+            history: vec![],
+            future: vec![],
+            processing: vec![],
+            exporting: false,
+            export_cancel: Arc::new(AtomicBool::new(false)),
+            export_progress: None,
+            export_path: None,
+            project_path: None,
+            preview_still: None,
             importing: false,
             import_cancel: Arc::new(AtomicBool::new(false)),
             cache: Workspace::new().ok().map(Arc::new),
@@ -499,10 +514,7 @@ impl Editor {
         let args: Vec<_> = std::env::args_os().collect();
         if let Some(pair) = args.windows(2).find(|pair| pair[0] == "--import") {
             editor.import_paths(vec![PathBuf::from(&pair[1])], window, cx);
-        } else if !args
-            .iter()
-            .any(|arg| arg == "--mock" || arg == "--empty" || arg == "--empty-timeline")
-        {
+        } else if args.iter().any(|arg| arg == "--demo") {
             editor.import_paths(
                 vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/media")],
                 window,
@@ -588,6 +600,7 @@ impl Editor {
         if gesture.changed
             && let Some(timing) = gesture.timing
         {
+            self.state.restore_timeline(&gesture.snapshot);
             self.dispatch(
                 Action::EditClipTiming {
                     index: self.state.selected_clip,
@@ -782,6 +795,7 @@ impl Editor {
         if self.importing {
             return;
         }
+        self.processing.clear();
         self.importing = true;
         self.import_cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.import_cancel.clone();
@@ -807,15 +821,21 @@ impl Editor {
             "Preprocessing media, separating audio channels, and generating thumbnails…".into(),
         );
         cx.spawn_in(window, async move |this, cx| {
-            let report = cx.background_spawn(async move {
-                catalog::import(paths, existing, cache.as_ref().map(|cache| cache.path.as_path()), cancel)
-            }).await;
+            let (sender, receiver) = async_channel::bounded(128);
+            let work = cx.background_spawn(async move {
+                catalog::import_with_progress(paths, existing, cache.as_ref().map(|cache| cache.path.as_path()), cancel,
+                    &mut |update| { let _=sender.send_blocking(update); })
+            });
+            while let Ok(update)=receiver.recv().await {
+                if this.update(cx,|this,cx|{this.update_processing(update);cx.notify();}).is_err(){return;}
+            }
+            let report = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.importing = false;
-                if report.cancelled {
-                    this.state.notice = Some("Import cancelled.".into());
-                } else {
+                this.finish_processing();
+                {
                     this.cancel_clip_gesture(window, cx);
+                    let before = rsx_video_editor::project::Timeline::capture(&this.state);
                     this.inline_edit=None;
                     let screen = this.state.screen;
                     let (added, duplicates, placed) = if composition_result {this.state.import_composition_result(report.assets)} else {this.state.import_into_project(report.assets)};
@@ -826,7 +846,9 @@ impl Editor {
                     let mut message = format!("Imported {added} file(s) · {placed} added to timeline · {duplicates} duplicate(s) skipped.");
                     if let Some(error) = report.errors.first() { message.push_str(&format!(" {} issue(s): {error}", report.errors.len())); }
                     if added == 0 && duplicates == 0 && report.errors.is_empty() { message = "No supported media files found in the selection.".into(); }
+                    if report.cancelled {message.push_str(" Remaining import cancelled.");}
                     this.state.notice = Some(message);
+                    this.record_edit(before);
                     this.media_scroll.set_offset(point(px(0.), px(0.)));
                     this.refresh_preview(window, cx);
                 }
@@ -835,12 +857,22 @@ impl Editor {
         }).detach();
         cx.notify();
     }
-    fn refresh_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.playing {
             self.restart_playback(window, cx);
             return;
         }
         self.output_worker.pause();
+        self.preview_still = None;
+        if self.state.screen.has_timeline() {
+            self.playback_plan = Some(PlaybackPlan::from_state(&self.state));
+            self.active_video = None;
+            self.schedule_video(true, window, cx);
+            self.seek.update(cx, |slider, cx| {
+                slider.set_value(self.state.position / self.state.seek_limit(), window, cx)
+            });
+            return;
+        }
         self.playback_plan = None;
         self.active_video = None;
         self.playback_gap = false;
@@ -951,7 +983,7 @@ impl Editor {
     }
     fn restart_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let plan = PlaybackPlan::from_state(&self.state);
-        if plan.audio.is_empty() && plan.videos.is_empty() {
+        if plan.audio.is_empty() && plan.videos.is_empty() && plan.images.is_empty() {
             self.state.playing = false;
             self.state.notice = Some("Import source media to play the project.".into());
             self.output_worker.pause();
@@ -971,12 +1003,34 @@ impl Editor {
         self.schedule_video(true, window, cx);
     }
     fn schedule_video(&mut self, force: bool, window: &mut Window, _cx: &mut Context<Self>) {
-        let video = self
+        let mut video = self
             .playback_plan
             .as_ref()
             .and_then(|plan| plan.video_at(self.state.position as f64))
             .map(|(index, region)| (index, region.clone()));
-        let index = video.as_ref().map(|(index, _)| *index);
+        let image = self
+            .playback_plan
+            .as_ref()
+            .and_then(|plan| plan.image_at(self.state.position as f64))
+            .map(|(index, image)| (index, image.clone()));
+        let image = image.filter(|(_, image)| {
+            video
+                .as_ref()
+                .is_none_or(|(_, video)| (image.track, image.order) >= (video.track, video.order))
+        });
+        if image.is_some() {
+            video = None;
+        }
+        let index = image
+            .as_ref()
+            .map(|(index, _)| {
+                index
+                    + self
+                        .playback_plan
+                        .as_ref()
+                        .map_or(0, |plan| plan.videos.len())
+            })
+            .or_else(|| video.as_ref().map(|(index, _)| *index));
         if !force && index == self.active_video {
             return;
         }
@@ -985,22 +1039,19 @@ impl Editor {
         if let Some(old) = self.preview_frame.take() {
             let _ = window.drop_image(old);
         }
-        self.playback_gap = video.is_none()
-            && self
-                .playback_plan
-                .as_ref()
-                .is_some_and(|plan| !plan.videos.is_empty());
+        self.preview_still = image.map(|(_, image)| image.path);
+        self.playback_gap = video.is_none() && self.preview_still.is_none();
         if let Some((_, region)) = video {
             let offset = region.start - region.source_start;
             self.preview_worker.request(PreviewRequest {
                 path: region.path,
                 position: (self.state.position as f64 - offset).max(region.source_start),
                 end: region.source_start + region.duration,
-                playing: true,
+                playing: self.state.playing,
                 generation: self.preview_generation,
                 stream: Some(region.stream),
                 keyframes: Some(region.keyframes),
-                clock: Some(self.output_worker.clock.clone()),
+                clock: self.state.playing.then(|| self.output_worker.clock.clone()),
                 clock_offset: offset,
             });
         } else {
@@ -1062,6 +1113,29 @@ impl Editor {
     }
     pub fn dispatch(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_clip_gesture(window, cx);
+        match action {
+            Action::Export => {
+                self.choose_export(window, cx);
+                return;
+            }
+            Action::SaveProject => {
+                self.choose_save(window, cx);
+                return;
+            }
+            Action::OpenProject => {
+                self.choose_project(window, cx);
+                return;
+            }
+            Action::CancelExport => {
+                self.export_cancel.store(true, Ordering::Relaxed);
+                return;
+            }
+            Action::Undo | Action::Redo => {
+                self.undo_timeline(matches!(action, Action::Redo), window, cx);
+                return;
+            }
+            _ => {}
+        }
         if self.graph_listening {
             self.output_worker.pause();
             self.graph_listening = false;
@@ -1152,17 +1226,8 @@ impl Editor {
                 | Action::DeleteTrack(_)
                 | Action::EditClipTiming { .. }
         ) || (matches!(action, Action::TargetClip(_)) && !self.state.playing);
-        let clear = matches!(
-            action,
-            Action::ClearFilters | Action::ClearPresetFilter | Action::Category(_)
-        );
-        let sync_controls = matches!(
-            action,
-            Action::ResetTransform
-                | Action::ResetCrop
-                | Action::SelectClip(_)
-                | Action::TargetClip(_)
-        );
+        let clear = matches!(action, Action::ClearFilters | Action::Category(_));
+        let sync_controls = matches!(action, Action::SelectClip(_) | Action::TargetClip(_));
         if matches!(action, Action::ResetWorkspace) {
             let editing = self.state.screen.has_timeline();
             let area = crate::workspace::workspace(cx.weak_entity(), editing, window, cx);
@@ -1184,7 +1249,9 @@ impl Editor {
         let old_zoom = self.state.zoom;
         let offset = self.timeline_scroll.offset();
         let playhead_x = self.state.position * self.timeline_scale + f32::from(offset.x);
+        let before = rsx_video_editor::project::Timeline::capture(&self.state);
         self.state.apply(action);
+        self.record_edit(before);
         if preview_changed {
             self.refresh_preview(window, cx);
         }

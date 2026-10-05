@@ -87,7 +87,20 @@ pub fn import(
     cache: Option<&Path>,
     cancel: Arc<AtomicBool>,
 ) -> ImportReport {
+    import_with_progress(paths, existing, cache, cancel, &mut |_| {})
+}
+pub fn import_with_progress(
+    paths: Vec<PathBuf>,
+    existing: BTreeSet<PathBuf>,
+    cache: Option<&Path>,
+    cancel: Arc<AtomicBool>,
+    progress: &mut dyn FnMut(crate::processing::Update),
+) -> ImportReport {
+    use crate::processing::{Stage, Update};
     let (files, errors) = discover(paths, &cancel);
+    for (path, _) in &files {
+        progress(Update::new(path, Stage::Queued, Some(0)));
+    }
     let mut report = ImportReport {
         errors,
         ..Default::default()
@@ -129,11 +142,25 @@ pub fn import(
         };
         // Reimported references are reported as duplicates without decoding them again.
         if !existing.contains(&path)
-            && let Err(error) = media::inspect(&mut asset, cache, cancel.clone())
+            && let Err(error) =
+                media::inspect_with_progress(&mut asset, cache, cancel.clone(), progress)
         {
             asset.metadata_error = Some(error.clone());
             report.errors.push(format!("{}: {error}", path.display()));
         }
+        let mut update = Update::new(
+            &path,
+            if cancel.load(Ordering::Relaxed) {
+                Stage::Cancelled
+            } else if asset.metadata_error.is_some() {
+                Stage::Failed
+            } else {
+                Stage::Ready
+            },
+            Some(100),
+        );
+        update.error = asset.metadata_error.clone();
+        progress(update);
         report.assets.push(asset);
     }
     report.cancelled |= cancel.load(Ordering::Relaxed);
@@ -220,5 +247,62 @@ mod tests {
         );
         assert!(cancelled.cancelled);
         assert!(cancelled.assets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::{Workspace, processing::Stage};
+    #[test]
+    fn reports_actual_pipeline_steps_and_terminal_failures() {
+        let cache = Workspace::new().unwrap();
+        let source = Workspace::new().unwrap();
+        let path = source.path.join("source.webm");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/media/murchison-falls.webm"),
+            &path,
+        )
+        .unwrap();
+        let broken = source.path.join("broken.webm");
+        fs::write(&broken, b"invalid media").unwrap();
+        let mut updates = Vec::new();
+        let report = import_with_progress(
+            vec![path.clone(), broken],
+            Default::default(),
+            Some(&cache.path),
+            Arc::new(AtomicBool::new(false)),
+            &mut |update| updates.push(update),
+        );
+        assert_eq!(report.errors.len(), 1);
+        let source = fs::canonicalize(path).unwrap();
+        let steps: Vec<_> = updates
+            .iter()
+            .filter(|update| update.path == source)
+            .map(|update| update.stage)
+            .collect();
+        for stage in [
+            Stage::Queued,
+            Stage::Inspecting,
+            Stage::Decoding,
+            Stage::Finalizing,
+            Stage::Thumbnail,
+            Stage::Ready,
+        ] {
+            assert!(steps.contains(&stage), "{steps:?}");
+        }
+        assert_eq!(steps.last(), Some(&Stage::Ready));
+        assert!(
+            updates
+                .iter()
+                .any(|update| update.stage == Stage::Failed && update.error.is_some())
+        );
+        let percentages: Vec<_> = updates
+            .iter()
+            .filter(|update| update.path == source && update.stage == Stage::Decoding)
+            .filter_map(|update| update.progress)
+            .collect();
+        assert!(percentages.len() > 1);
+        assert!(percentages.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 }

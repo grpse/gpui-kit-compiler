@@ -1,4 +1,4 @@
-//! Real project media and non-destructive timeline state; visual fixtures are opt-in.
+//! Real project media and non-destructive timeline state.
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -8,33 +8,25 @@ use std::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Edit,
-    Tracking,
     Library,
     Overview,
     Compositing,
 }
 impl Screen {
-    pub const ALL: [Self; 5] = [
-        Self::Library,
-        Self::Overview,
-        Self::Edit,
-        Self::Compositing,
-        Self::Tracking,
-    ];
+    pub const ALL: [Self; 4] = [Self::Library, Self::Overview, Self::Edit, Self::Compositing];
     pub fn label(self) -> &'static str {
         match self {
             Self::Edit => "Edit",
-            Self::Tracking => "Tracking",
             Self::Library => "Media",
             Self::Overview => "Overview",
             Self::Compositing => "Compositing",
         }
     }
     pub fn has_timeline(self) -> bool {
-        matches!(self, Self::Edit | Self::Tracking)
+        matches!(self, Self::Edit)
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Video,
     Audio,
@@ -92,20 +84,16 @@ impl Asset {
         self.path
             .as_ref()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| {
-                format!(
-                    "{}/{}",
-                    mock_project()["location_root"].as_str().unwrap(),
-                    self.name
-                )
-            })
+            .unwrap_or_else(|| "Source unavailable".into())
     }
 }
-/// The original visual reference project is available only in explicit mock mode.
+/// Historical editing fixtures are compiled only into unit tests.
+#[cfg(test)]
 fn mock_project() -> serde_json::Value {
     serde_json::from_str(include_str!("../assets/mocks/project.json"))
         .expect("valid bundled mock project")
 }
+#[cfg(test)]
 pub fn assets() -> Vec<Asset> {
     mock_project()["assets"]
         .as_array()
@@ -139,13 +127,7 @@ pub fn assets() -> Vec<Asset> {
         })
         .collect()
 }
-#[derive(Clone, Debug)]
-pub struct Job {
-    pub asset: usize,
-    pub progress: u8,
-    pub cancelled: bool,
-}
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     pub name: String,
     pub audio: bool,
@@ -154,7 +136,7 @@ pub struct Track {
     pub muted: bool,
     pub gain: f32,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Clip {
     pub name: Option<String>,
     pub asset: usize,
@@ -165,7 +147,7 @@ pub struct Clip {
     pub component: Option<ClipComponent>,
     pub link_group: Option<u64>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClipComponent {
     Video(usize),
     AudioChannel { stream: usize, channel: usize },
@@ -203,8 +185,6 @@ struct ClipClipboard {
 pub enum Action {
     Screen(Screen),
     ResetWorkspace,
-    Preset(&'static str),
-    ClearPresetFilter,
     Select(usize),
     MultiSelect(usize),
     Category(String),
@@ -223,26 +203,16 @@ pub enum Action {
     ImportFolder,
     AddToTimeline,
     ShowInFinder,
-    CancelJob(usize),
     CancelAll,
     Play,
     Seek(f32),
     Step(f32),
     Mute,
     Loop,
-    Quality,
     Fullscreen,
     Inspector(usize),
     DetailTab(usize),
-    TrackingMode(usize),
-    Track(bool),
-    TrackTarget,
-    Attach,
-    Toggle(&'static str),
-    Section(&'static str),
     Control(usize, f32),
-    ResetTransform,
-    ResetCrop,
     Tool(&'static str),
     SelectClip(usize),
     TrackVisible(usize),
@@ -272,12 +242,17 @@ pub enum Action {
     AddTrack,
     Zoom(f32),
     Export,
-    Share,
-    Project,
+    SaveProject,
+    OpenProject,
+    CancelExport,
+    Undo,
+    Redo,
     Dismiss,
-    Mock(&'static str),
 }
 pub fn timeline_shortcut(key: &str, command: bool, alt: bool, shift: bool) -> Option<Action> {
+    if command && !alt && key == "z" {
+        return Some(if shift { Action::Redo } else { Action::Undo });
+    }
     if alt || shift {
         return None;
     }
@@ -310,28 +285,20 @@ pub struct EditorState {
     pub muted: bool,
     pub monitor_gain: f32,
     pub looping: bool,
-    pub quality: usize,
     pub fullscreen: bool,
     pub inspector: usize,
     pub detail_tab: usize,
-    pub tracking_mode: usize,
-    pub tracking_target: usize,
-    pub attach: bool,
-    pub toggles: BTreeSet<&'static str>,
-    pub collapsed: BTreeSet<&'static str>,
     pub controls: [f32; 10],
-    pub jobs: Vec<Job>,
     pub tracks: Vec<Track>,
     pub track_revision: u64,
     pub clips: Vec<Clip>,
     /// Full imported source spans survive trims, so linked channels can be restored.
-    clip_sources: BTreeMap<u64, Vec<Clip>>,
+    pub(crate) clip_sources: BTreeMap<u64, Vec<Clip>>,
     pub selected_clip: usize,
     clipboard: Option<ClipClipboard>,
     pub zoom: f32,
-    next_link_group: u64,
+    pub(crate) next_link_group: u64,
     pub project_min_duration: f32,
-    pub selected_preset: Option<&'static str>,
     pub notice: Option<String>,
     pub events: Vec<String>,
 }
@@ -357,17 +324,10 @@ impl Default for EditorState {
             muted: false,
             monitor_gain: 1.,
             looping: false,
-            quality: 0,
             fullscreen: false,
             inspector: 0,
             detail_tab: 0,
-            tracking_mode: 1,
-            tracking_target: 0,
-            attach: false,
-            toggles: BTreeSet::from(["AI Tracking", "Show Track Path"]),
-            collapsed: BTreeSet::new(),
             controls: [100., 0., 100., 0., 0., 0., 0., 50., 100., 0.],
-            jobs: vec![],
             tracks: vec![],
             track_revision: 0,
             clips: vec![],
@@ -377,13 +337,13 @@ impl Default for EditorState {
             zoom: 1.,
             next_link_group: 1,
             project_min_duration: 1.,
-            selected_preset: None,
             notice: None,
             events: vec![],
         }
     }
 }
 impl EditorState {
+    #[cfg(test)]
     pub fn mock() -> Self {
         let data = mock_project();
         Self {
@@ -391,16 +351,6 @@ impl EditorState {
             checked: BTreeSet::from([0]),
             position: data["position"].as_f64().unwrap() as f32,
             project_min_duration: data["min_duration"].as_f64().unwrap() as f32,
-            jobs: data["jobs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| Job {
-                    asset: v[0].as_u64().unwrap() as usize,
-                    progress: v[1].as_u64().unwrap() as u8,
-                    cancelled: false,
-                })
-                .collect(),
             tracks: data["tracks"]
                 .as_array()
                 .unwrap()
@@ -432,23 +382,6 @@ impl EditorState {
             ..Self::default()
         }
     }
-    pub fn mock_folders(&self) -> Vec<(String, usize)> {
-        if !self.assets.iter().any(|asset| asset.path.is_none()) {
-            return vec![];
-        }
-        mock_project()["folders"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| {
-                (
-                    v[0].as_str().unwrap().into(),
-                    v[1].as_u64().unwrap() as usize,
-                )
-            })
-            .collect()
-    }
-
     pub fn clip_label(&self, index: usize) -> String {
         let Some(clip) = self.clips.get(index) else {
             return String::new();
@@ -1065,7 +998,6 @@ impl EditorState {
             self.apply(Action::ClearFilters);
             self.apply(Action::Select(first));
             self.checked = added.iter().copied().collect();
-            self.jobs.clear();
         }
         (added.len(), duplicates)
     }
@@ -1205,11 +1137,6 @@ impl EditorState {
         }
         match action {
             Action::ResetWorkspace => {}
-            Action::ClearPresetFilter => self.query.clear(),
-            Action::Preset(name) => {
-                self.selected_preset = Some(name);
-                self.notice = Some(format!("Mock {} preset: {name}", self.category));
-            }
             Action::Screen(v) => {
                 self.screen = v;
                 self.fullscreen = false;
@@ -1256,7 +1183,6 @@ impl EditorState {
             }
             Action::Category(v) => {
                 self.category = v;
-                self.selected_preset = None;
                 self.folder.clear();
                 self.query.clear();
                 self.type_filter = 0;
@@ -1517,16 +1443,7 @@ impl EditorState {
                     ids.len()
                 ));
             }
-            Action::CancelJob(i) => {
-                if let Some(j) = self.jobs.get_mut(i) {
-                    j.cancelled = true;
-                }
-            }
-            Action::CancelAll => {
-                for j in &mut self.jobs {
-                    j.cancelled = true;
-                }
-            }
+            Action::CancelAll => self.notice = Some("Stopping media processing…".into()),
             Action::Play => {
                 if self.assets.is_empty() {
                     self.notice = Some("Import media to start playback.".into());
@@ -1542,9 +1459,9 @@ impl EditorState {
                 } else {
                     Some(
                         if self.playing {
-                            "Mock playback started · preview is a still frame"
+                            "Source unavailable for playback"
                         } else {
-                            "Mock playback paused"
+                            "Preview paused"
                         }
                         .into(),
                     )
@@ -1554,27 +1471,9 @@ impl EditorState {
             Action::Step(v) => self.position = (self.position + v).clamp(0., self.seek_limit()),
             Action::Mute => self.muted = !self.muted,
             Action::Loop => self.looping = !self.looping,
-            Action::Quality => self.quality = (self.quality + 1) % 3,
             Action::Fullscreen => self.fullscreen = !self.fullscreen,
             Action::Inspector(v) => self.inspector = v.min(1),
             Action::DetailTab(v) => self.detail_tab = v,
-            Action::TrackingMode(v) => self.tracking_mode = v,
-            Action::Track(forward) => {
-                self.position = if forward { 8. } else { 1. };
-                self.notice = Some("Mock tracking path applied to the preview".into());
-            }
-            Action::TrackTarget => self.tracking_target = (self.tracking_target + 1) % 3,
-            Action::Attach => self.attach = !self.attach,
-            Action::Toggle(v) => {
-                if !self.toggles.remove(v) {
-                    self.toggles.insert(v);
-                }
-            }
-            Action::Section(v) => {
-                if !self.collapsed.remove(v) {
-                    self.collapsed.insert(v);
-                }
-            }
             Action::Control(i, v) if i < self.controls.len() => {
                 self.controls[i] = v;
                 if i == 8 {
@@ -1592,12 +1491,6 @@ impl EditorState {
                     }
                 }
             }
-            Action::ResetTransform => {
-                self.controls[0] = 100.;
-                self.controls[1] = 0.;
-                self.controls[2] = 100.;
-            }
-            Action::ResetCrop => self.controls[3..7].fill(0.),
             Action::SelectClip(i) if i < self.clips.len() => {
                 self.selected_clip = i;
                 self.selected = self.clips[i].asset;
@@ -1765,16 +1658,12 @@ impl EditorState {
             }
             Action::Zoom(v) => self.zoom = (self.zoom + v).clamp(0.25, 8.),
             Action::Dismiss => self.notice = None,
-            Action::Export => {
-                self.notice = Some("Mock export queued · My Project.mp4 · 4K / H.264".into())
-            }
-            Action::Share => {
-                self.notice = Some("Mock share link copied · flowcut.example/my-project".into())
-            }
-            Action::Project => {
-                self.notice =
-                    Some("Mock project menu · My Project / Travel Film / New Project".into())
-            }
+            Action::Export
+            | Action::SaveProject
+            | Action::OpenProject
+            | Action::CancelExport
+            | Action::Undo
+            | Action::Redo => {}
             Action::Tool("Split") => {
                 let selected_index = self.selected_clip;
                 if let Some(selected) = self.clips.get(selected_index).cloned() {
@@ -1874,7 +1763,7 @@ impl EditorState {
                     }
                 }
             }
-            Action::Tool(v) | Action::Mock(v) => self.notice = Some(format!("Mock action: {v}")),
+            Action::Tool(v) => self.notice = Some(format!("Unavailable action: {v}")),
             _ => {}
         }
     }
@@ -2208,7 +2097,7 @@ mod tests {
         ));
         state.apply(Action::Inspector(4));
         assert_eq!(state.inspector, 1);
-        state.apply(Action::Screen(Screen::Tracking));
+        state.apply(Action::Screen(Screen::Edit));
         assert_eq!(state.inspector, 0);
         state.apply(Action::SelectClip(1));
         assert_eq!(state.inspector, 1);
@@ -2430,7 +2319,7 @@ mod tests {
     #[test]
     fn empty_project_handles_transport_and_screen_changes_without_fixture_assets() {
         let mut state = EditorState::default();
-        assert!(state.assets.is_empty() && state.clips.is_empty() && state.jobs.is_empty());
+        assert!(state.assets.is_empty() && state.clips.is_empty());
         for screen in Screen::ALL {
             state.apply(Action::Screen(screen));
             state.apply(Action::Favorite);
@@ -2665,7 +2554,6 @@ mod tests {
         assert_eq!(s.import_assets(vec![video]), (1, 0));
         assert_eq!(s.selected, first);
         assert_eq!(s.visible_assets()[0], first);
-        assert!(s.jobs.is_empty());
         s.apply(Action::Folder("/videos".into()));
         assert_eq!(s.visible_assets(), vec![first]);
         s.apply(Action::Search("my video".into()));
@@ -2770,11 +2658,6 @@ mod tests {
         assert_eq!(s.assets[s.selected].duration_label(), "Still image");
         s.apply(Action::Select(9));
         assert_eq!(s.inspector, 1);
-        s.apply(Action::Category("Text".into()));
-        s.apply(Action::Preset("Lower third"));
-        assert_eq!(s.selected_preset, Some("Lower third"));
-        s.apply(Action::Category("Effects".into()));
-        assert!(s.selected_preset.is_none());
     }
     #[test]
     fn project_playhead_can_seek_past_the_selected_clip_and_audio_has_full_duration() {
@@ -2794,11 +2677,7 @@ mod tests {
     #[test]
     fn cancel_and_timeline_controls_are_local() {
         let mut s = EditorState::mock();
-        s.apply(Action::CancelJob(0));
-        assert!(s.jobs[0].cancelled);
-        assert!(!s.jobs[1].cancelled);
         s.apply(Action::CancelAll);
-        assert!(s.jobs.iter().all(|j| j.cancelled));
         s.apply(Action::TrackLocked(0));
         assert!(s.tracks[0].locked);
         s.apply(Action::AddTrack);
@@ -2807,7 +2686,7 @@ mod tests {
         assert_eq!(s.zoom, 8.);
         s.apply(Action::Zoom(-100.));
         assert_eq!(s.zoom, 0.25);
-        s.apply(Action::Screen(Screen::Tracking));
+        s.apply(Action::Screen(Screen::Edit));
         assert!(s.inspector <= 1);
         assert!(s.screen.has_timeline());
     }

@@ -35,6 +35,7 @@ pub struct AudioRegion {
 }
 #[derive(Clone)]
 pub struct VideoRegion {
+    pub order: usize,
     pub asset: usize,
     pub track: usize,
     pub path: PathBuf,
@@ -44,10 +45,19 @@ pub struct VideoRegion {
     pub source_start: f64,
     pub keyframes: Arc<crate::preprocess::KeyframeIndex>,
 }
+#[derive(Clone)]
+pub struct ImageRegion {
+    pub order: usize,
+    pub path: PathBuf,
+    pub track: usize,
+    pub start: f64,
+    pub duration: f64,
+}
 #[derive(Clone, Default)]
 pub struct PlaybackPlan {
     pub audio: Vec<AudioRegion>,
     pub videos: Vec<VideoRegion>,
+    pub images: Vec<ImageRegion>,
     pub end: f64,
 }
 fn pan(name: &str, index: usize, count: usize) -> [f32; 2] {
@@ -73,13 +83,25 @@ impl PlaybackPlan {
         let mut plan = Self::default();
         if state.screen.has_timeline() {
             plan.end = state.project_duration() as f64;
-            for clip in &state.clips {
+            for (order, clip) in state.clips.iter().enumerate() {
                 let Some(track) = state.tracks.get(clip.track) else {
                     continue;
                 };
                 let Some(asset) = state.assets.get(clip.asset) else {
                     continue;
                 };
+                if asset.kind == crate::state::Kind::Image
+                    && track.visible
+                    && let Some(path) = &asset.path
+                {
+                    plan.images.push(ImageRegion {
+                        order,
+                        path: path.clone(),
+                        track: clip.track,
+                        start: clip.start as f64,
+                        duration: clip.length as f64,
+                    });
+                }
                 let Some(media) = &asset.prepared else {
                     continue;
                 };
@@ -105,6 +127,7 @@ impl PlaybackPlan {
                             && let Some(path) = &asset.path
                         {
                             plan.videos.push(VideoRegion {
+                                order,
                                 asset: clip.asset,
                                 track: clip.track,
                                 path: path.clone(),
@@ -120,7 +143,8 @@ impl PlaybackPlan {
                 }
             }
             // Highest visible video track wins; deterministic clip order breaks ties.
-            plan.videos.sort_by_key(|video| video.track);
+            plan.videos.sort_by_key(|video| (video.track, video.order));
+            plan.images.sort_by_key(|image| (image.track, image.order));
         } else if let Some(asset) = state.assets.get(state.selected) {
             plan.end = asset.duration as f64;
             if let Some(media) = &asset.prepared {
@@ -170,6 +194,7 @@ impl PlaybackPlan {
                         .unwrap_or(asset.duration as f64);
                     plan.end = plan.end.max(start + duration);
                     plan.videos.push(VideoRegion {
+                        order: 0,
                         asset: state.selected,
                         track: 0,
                         path: path.clone(),
@@ -188,6 +213,13 @@ impl PlaybackPlan {
             }
         }
         plan
+    }
+    pub fn image_at(&self, time: f64) -> Option<(usize, &ImageRegion)> {
+        self.images
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, image)| time >= image.start && time < image.start + image.duration)
     }
     pub fn video_at(&self, time: f64) -> Option<(usize, &VideoRegion)> {
         self.videos

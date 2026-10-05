@@ -1,9 +1,9 @@
 //! Socket and property metadata extracted from the official Blender 4.5 LTS runtime.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::OnceLock;
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Socket {
     pub name: String,
     pub kind: String,
@@ -11,12 +11,12 @@ pub struct Socket {
     pub enabled: bool,
     pub default: Value,
 }
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Choice {
     pub value: String,
     pub label: String,
 }
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Parameter {
     pub key: String,
     pub label: String,
@@ -139,7 +139,7 @@ impl Parameter {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Definition {
     pub id: String,
     pub label: String,

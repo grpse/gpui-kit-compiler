@@ -5,8 +5,7 @@ use crate::{editor::Editor,generated::primitives::*,state::{Action,Screen}};
 #[gpui]
 pub fn sidebar(editor:&Editor,width:f32,cx:&mut Context<Editor>) -> impl IntoElement + use<> {
     let library=editor.state.screen==Screen::Library;
-    let nav:Vec<(&str,IconName)>=if library {vec![("All",IconName::Images),("Videos",IconName::Film),("Audio",IconName::Music),("Images",IconName::Image),("Favorites",IconName::Star),("Recent",IconName::Clock)]}
-        else {vec![("All",IconName::Folder),("Audio",IconName::Music),("Text",IconName::Type),("Effects",IconName::Sparkles),("Transitions",IconName::PanelsTopLeft),("Elements",IconName::Layers),("Captions",IconName::Captions)]};
+    let nav:Vec<(&str,IconName)>=vec![("All",IconName::Folder),("Videos",IconName::Film),("Audio",IconName::Music),("Images",IconName::Image),("Favorites",IconName::Star)];
     <div id="navigation" flex flex-col w={px(width)} h-full flex-shrink-0 bg={rgb(PANEL)} border-r-1 border-color={rgb(BORDER)} px={px(8.)} py={px(12.)} gap={px(8.)} overflow-y-scroll overflow-x-scroll>
         {if library {<div mb-3>{tool("import-side","Import Media",Some(IconName::FileUp),Action::Import,true,cx)}</div>.into_any_element()}else{div().into_any_element()}}
         <div flex flex-col flex-shrink-0 gap-2 children={nav.into_iter().map(|(category,icon)| {
@@ -20,15 +19,7 @@ pub fn sidebar(editor:&Editor,width:f32,cx:&mut Context<Editor>) -> impl IntoEle
             })} />
         {if library {
             <div flex flex-col flex-shrink-0 gap-1 mt-3 border-t-1 border-color={rgb(BORDER)} pt-3>
-                <div flex items-center justify-between px-2><div text-color={rgb(MUTED)}>Folders</div>{tool("add-folder","",Some(IconName::Plus),Action::ImportFolder,false,cx)}</div>
-                <div flex flex-col gap-2 children={editor.state.mock_folders().into_iter().map(|(folder,indent)| {
-                    let selected=editor.state.folder==folder;
-                    <div pl={px(indent as f32*18.)}>
-                    <Button args={SharedString::from(format!("folder-{folder}"))} ghost justify-start w-full h={px(39.)} icon={if folder=="Trash"{IconName::Trash}else{IconName::Folder}} label={folder.clone()}
-                    bg={rgb(if selected{0x26223f}else{PANEL})} text-color={rgb(if selected {0xb298ff}else{TEXT})} text-size={px(12.)}
-                    on-click={cx.listener(move |this,_,window,cx|this.dispatch(Action::Folder(folder.clone()),window,cx))} />
-                    </div>
-                    })} />
+                <div flex items-center justify-start gap-2 px-2><div text-color={rgb(MUTED)}>Folders</div>{tool("add-folder","",Some(IconName::Plus),Action::ImportFolder,false,cx)}</div>
                 <div flex flex-col gap-2 children={editor.state.imported_folders().into_iter().map(|path| {
                     let folder=path.display().to_string();
                     let label=path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -39,8 +30,8 @@ pub fn sidebar(editor:&Editor,width:f32,cx:&mut Context<Editor>) -> impl IntoEle
                 })} />
             </div>.into_any_element()
         } else {<div flex flex-col flex-shrink-0 mt={px(55.)} pt-3 border-t-1 border-color={rgb(BORDER)} gap-2>
-                {tool("projects","Projects",Some(IconName::Folder),Action::Project,false,cx)}
-                {tool("settings","Settings",Some(IconName::Settings),Action::Mock("Settings"),false,cx)}
+                {tool("projects","Open project",Some(IconName::Folder),Action::OpenProject,false,cx)}
+                {tool("save-side","Save project",None,Action::SaveProject,false,cx)}
             </div>.into_any_element()}}
     </div>
 }

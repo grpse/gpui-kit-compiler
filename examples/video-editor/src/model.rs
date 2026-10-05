@@ -1,11 +1,14 @@
-pub mod blender_catalog;
 pub mod blender_backend;
+pub mod blender_catalog;
 pub mod catalog;
 pub mod compositing;
 pub mod composition;
+pub mod export;
 pub mod media;
 pub mod playback;
 pub mod preprocess;
+pub mod processing;
+pub mod project;
 pub mod proof;
 pub mod state;
 
