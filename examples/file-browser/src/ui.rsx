@@ -4,15 +4,20 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, StyledExt as _,
     Icon, Theme, ThemeMode, button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState}, list::ListItem,
+    menu::{ContextMenuExt as _, PopupMenuItem},
     resizable::{h_resizable, resizable_panel}, tab::{Tab, TabBar},
     tree::{tree, TreeItem, TreeState}, spinner::Spinner,
     setting::{Settings, SettingPage, SettingGroup, SettingItem, SettingField},
 };
 use gpui_kit::assets::IconName;
-use rsx_file_browser::{Entry, History, Preview, Appearance, Preferences, Node, Scan, ScanProgress, SearchUpdate, preview, read_directory, search, scan_with_progress, largest_files};
+use rsx_file_browser::{
+    Entry, History, Preview, Appearance, Preferences, Node, Scan, ScanProgress, SearchUpdate,
+    create_folder, delete_permanently, duplicate_entry, move_to_trash, node_at, preview,
+    read_directory, rename_entry, search, search_tree, scan_with_progress, largest_files,
+};
 use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 
-actions!(file_explorer, [Find, ToggleHidden, GoToFolder, Back, Forward, Parent, NewTab, CloseTab, QuickLook, OpenSelection, NextItem, PreviousItem, ExpandItem, CollapseItem, Dismiss, ShowSettings]);
+actions!(file_explorer, [Find, ToggleHidden, GoToFolder, Back, Forward, Parent, NewTab, CloseTab, QuickLook, OpenSelection, NextItem, PreviousItem, ExpandItem, CollapseItem, Dismiss, ShowSettings, RenameItem, GetInfo, MoveToTrash, NewFolder]);
 
 struct FolderTab {
     id: usize, generation: u64, history: History,
@@ -20,51 +25,60 @@ struct FolderTab {
     loading_children: HashSet<PathBuf>, loading: bool, unreadable: usize,
     selected: Option<Entry>, preview: Option<Result<Preview, String>>, preview_generation: u64,
     status: String,
+    query: String, searching: bool, search_update: SearchUpdate, search_error: Option<String>,
+    search_generation: u64, search_cancel: Arc<AtomicBool>,
 }
 #[derive(Clone)]
 struct FileRow { entry: Entry, depth: usize }
+struct Analysis {
+    id: usize, path: PathBuf, cancel: Arc<AtomicBool>, scanning: bool, queued: bool,
+    progress: ScanProgress, scan: Option<Arc<Scan>>, sizes: Arc<HashMap<PathBuf, Node>>,
+    largest_logical: Vec<Node>, largest_allocated: Vec<Node>, error: Option<String>,
+}
 
 pub struct Browser {
     tabs: Vec<FolderTab>, active: usize, next_id: usize,
-    address: Entity<InputState>, search_input: Entity<InputState>, focus: FocusHandle, list_focus: FocusHandle, list_scroll: UniformListScrollHandle,
-    query: String, search_open: bool, recursive: bool, hidden: bool,
-    search_generation: u64, search_cancel: Arc<AtomicBool>, searching: bool, search_update: SearchUpdate, search_error: Option<String>,
-    scan_generation: u64, scan_cancel: Arc<AtomicBool>, scanning: bool, scan_progress: ScanProgress,
-    scan_root: Option<PathBuf>, scan: Option<Arc<Scan>>, sizes: Arc<HashMap<PathBuf, Node>>, largest: Vec<Node>, largest_logical: Vec<Node>, largest_allocated: Vec<Node>, scan_error: Option<String>,
-    tree: Entity<TreeState>, tree_nodes: Arc<HashMap<String, Node>>, analysis_tab: usize,
-    settings_open: bool, address_open: bool, inspector_open: bool, detail_tab: usize,
+    address: Entity<InputState>, search_input: Entity<InputState>, rename_input: Entity<InputState>,
+    focus: FocusHandle, list_focus: FocusHandle, list_scroll: UniformListScrollHandle,
+    search_open: bool, hidden: bool,
+    analyses: Vec<Analysis>, next_analysis: usize, analysis_tab: usize,
+    tree: Entity<TreeState>, tree_nodes: Arc<HashMap<String, Node>>,
+    settings_open: bool, inspector_open: bool, detail_tab: usize,
+    rename: Option<PathBuf>, confirm_delete: Option<Entry>, dragging_tab: Option<usize>,
     appearance: Appearance, allocated: bool, preference_status: String,
     sort: usize, descending: bool, _subscriptions: Vec<Subscription>,
 }
 impl Drop for Browser {
     fn drop(&mut self) {
-        self.search_cancel.store(true, Ordering::Relaxed);
-        self.scan_cancel.store(true, Ordering::Relaxed);
+        for tab in &self.tabs { tab.search_cancel.store(true, Ordering::Relaxed); }
+        for analysis in &self.analyses { analysis.cancel.store(true, Ordering::Relaxed); }
     }
 }
 impl Browser {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::bind_shortcuts(cx);
-        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Go to folder — Enter to open"));
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files…"));
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Full folder path — Enter to open"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in this folder and subfolders…"));
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New name"));
         let tree = cx.new(|cx| TreeState::new(cx));
         let preferences = preferences_path().filter(|path|path.exists()).map(|path| Preferences::load(&path)).unwrap_or(Preferences {appearance: Appearance::System, allocated: true});
         apply_appearance(preferences.appearance, window, cx);
         let subscriptions = vec![
             cx.subscribe(&search_input, |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.query = input.read(cx).value().to_string();
+                    this.tabs[this.active].query = input.read(cx).value().to_string();
                     this.start_search(cx);
                 }
             }),
             cx.subscribe_in(&address, window, |this, input, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let value = input.read(cx).value().to_string();
-                    let path = expand_home(&value);
-                    this.navigate(path, window, cx);
-                    this.address_open = false;
+                    this.open_path(&value, window, cx);
                     this.list_focus.focus(window,cx);
                 }
+            }),
+            cx.subscribe_in(&rename_input, window, |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) { this.commit_rename(window, cx); }
             }),
             cx.observe(&tree, |this, tree, cx| {
                 let node = tree.read(cx).selected_item().and_then(|item| this.tree_nodes.get(item.id.as_ref())).cloned();
@@ -83,14 +97,13 @@ impl Browser {
         ];
         Self::observe_theme(cx);
         let mut this = Self {
-            tabs: vec![], active: 0, next_id: 0, address, search_input,
+            tabs: vec![], active: 0, next_id: 0, address, search_input, rename_input,
             focus: cx.focus_handle(), list_focus: cx.focus_handle(), list_scroll: UniformListScrollHandle::default(),
-            query: String::new(), search_open: false, recursive: true, hidden: false,
-            search_generation: 0, search_cancel: Arc::new(AtomicBool::new(false)), searching: false, search_update: SearchUpdate::default(), search_error: None,
-            scan_generation: 0, scan_cancel: Arc::new(AtomicBool::new(false)), scanning: false, scan_progress: ScanProgress::default(),
-            scan_root: None, scan: None, sizes: Arc::new(HashMap::new()), largest: vec![], largest_logical: vec![], largest_allocated: vec![], scan_error: None,
-            tree, tree_nodes: Arc::new(HashMap::new()), analysis_tab: 0,
-            settings_open: false, address_open: false, inspector_open: false, detail_tab: 1,
+            search_open: false, hidden: false,
+            analyses: vec![], next_analysis: 0, analysis_tab: 0,
+            tree, tree_nodes: Arc::new(HashMap::new()),
+            settings_open: false, inspector_open: false, detail_tab: 1,
+            rename: None, confirm_delete: None, dragging_tab: None,
             appearance: preferences.appearance, allocated: preferences.allocated, preference_status: "Changes save automatically.".into(),
             sort: 0, descending: false, _subscriptions: subscriptions,
         };
@@ -106,35 +119,79 @@ impl Browser {
     fn bind_shortcuts(cx: &mut Context<Self>) {
         cx.bind_keys([
             KeyBinding::new("cmd-f", Find, Some("FileExplorer")),
+            KeyBinding::new("ctrl-f", Find, Some("FileExplorer")),
             KeyBinding::new("cmd-shift-.", ToggleHidden, Some("FileExplorer")),
-            // macOS normalizes shifted punctuation into the resulting character.
             KeyBinding::new("cmd->", ToggleHidden, Some("FileExplorer")),
             KeyBinding::new("cmd-shift-g", GoToFolder, Some("FileExplorer")),
             KeyBinding::new("cmd-[", Back, Some("FileExplorer")), KeyBinding::new("cmd-]", Forward, Some("FileExplorer")),
             KeyBinding::new("cmd-up", Parent, Some("FileExplorer")),
-            KeyBinding::new("cmd-t", NewTab, Some("FileExplorer")), KeyBinding::new("cmd-w", CloseTab, Some("FileExplorer")),
+            KeyBinding::new("cmd-t", NewTab, Some("FileExplorer")), KeyBinding::new("ctrl-t", NewTab, Some("FileExplorer")),
+            KeyBinding::new("cmd-w", CloseTab, Some("FileExplorer")),
             KeyBinding::new("cmd-,", ShowSettings, Some("FileExplorer")),
             KeyBinding::new("escape", Dismiss, Some("FileExplorer")),
             KeyBinding::new("space", QuickLook, Some("ExplorerList")),
             KeyBinding::new("cmd-down", OpenSelection, Some("ExplorerList")),
             KeyBinding::new("down", NextItem, Some("ExplorerList")), KeyBinding::new("up", PreviousItem, Some("ExplorerList")),
             KeyBinding::new("right", ExpandItem, Some("ExplorerList")), KeyBinding::new("left", CollapseItem, Some("ExplorerList")),
+            KeyBinding::new("f2", RenameItem, Some("ExplorerList")),
+            KeyBinding::new("cmd-i", GetInfo, Some("ExplorerList")),
+            KeyBinding::new("cmd-backspace", MoveToTrash, Some("ExplorerList")),
+            KeyBinding::new("cmd-shift-n", NewFolder, Some("ExplorerList")),
         ]);
+    }
+    fn empty_tab(id: usize, path: PathBuf) -> FolderTab {
+        FolderTab {
+            id, generation: 0, history: History::new(path), entries: vec![], expanded: HashSet::new(), children: HashMap::new(),
+            loading_children: HashSet::new(), loading: false, unreadable: 0, selected: None, preview: None, preview_generation: 0, status: String::new(),
+            query: String::new(), searching: false, search_update: SearchUpdate::default(), search_error: None,
+            search_generation: 0, search_cancel: Arc::new(AtomicBool::new(false)),
+        }
     }
     fn add_tab(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_id; self.next_id += 1;
-        self.tabs.push(FolderTab { id, generation: 0, history: History::new(path), entries: vec![], expanded: HashSet::new(), children: HashMap::new(), loading_children: HashSet::new(), loading: false, unreadable: 0, selected: None, preview: None, preview_generation: 0, status: String::new() });
+        self.tabs.push(Self::empty_tab(id, path));
         self.active = self.tabs.len() - 1;
         self.refresh(window, cx);
     }
-    fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() == 1 { window.remove_window(); return; }
-        self.tabs.remove(self.active); self.active = self.active.min(self.tabs.len() - 1);
-        self.sync_address(window, cx); self.start_search(cx); cx.notify();
+        self.tabs[index].search_cancel.store(true, Ordering::Relaxed);
+        self.tabs.remove(index);
+        self.active = if index < self.active { self.active - 1 } else { self.active.min(self.tabs.len() - 1) };
+        self.sync_query(window, cx); self.sync_address(window, cx); self.rebuild_storage_tree(cx); cx.notify();
+    }
+    fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.close_tab_at(self.active, window, cx); }
+    fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() { return; }
+        self.active = index;
+        self.sync_query(window, cx); self.sync_address(window, cx); self.rebuild_storage_tree(cx); cx.notify();
+    }
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() { return; }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if self.active == from { self.active = to; }
+        else if from < self.active && to >= self.active { self.active -= 1; }
+        else if from > self.active && to <= self.active { self.active += 1; }
+        self.dragging_tab = Some(to);
     }
     fn sync_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.tabs[self.active].history.current().to_string_lossy().into_owned();
         self.address.update(cx, |input, cx| input.set_value(path, window, cx));
+    }
+    fn sync_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.tabs[self.active].query.clone();
+        self.search_input.update(cx, |input, cx| input.set_value(query, window, cx));
+    }
+    fn open_path(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = expand_home(value.trim());
+        let candidate = if typed.is_absolute() { typed } else { self.tabs[self.active].history.current().join(typed) };
+        match std::fs::canonicalize(&candidate) {
+            Ok(path) if path.is_dir() => self.navigate(path, window, cx),
+            Ok(_) => self.tabs[self.active].status = "That path is a file. Enter a folder path.".into(),
+            Err(error) => self.tabs[self.active].status = format!("Could not open folder: {error}"),
+        }
+        cx.notify();
     }
     fn navigate(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path = if path.is_absolute() {path} else {self.tabs[self.active].history.current().join(path)};
@@ -149,6 +206,7 @@ impl Browser {
         tab.entries.clear(); tab.children.clear(); tab.expanded.clear(); tab.loading_children.clear();
         let generation = tab.generation; let id = tab.id; let path = tab.history.current().to_owned();
         self.start_search(cx);
+        self.rebuild_storage_tree(cx);
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { read_directory(&path) }).await;
             let _ = this.update(cx, |this, cx| {
@@ -161,31 +219,59 @@ impl Browser {
         }).detach();
         cx.notify();
     }
+    fn indexed_node(&self, path: &Path) -> Option<Node> {
+        let mut best: Option<&Node> = None;
+        for analysis in &self.analyses {
+            if let Some(scan) = &analysis.scan {
+                if path.starts_with(&scan.root.path) {
+                    if let Some(node) = node_at(&scan.root, path) {
+                        if best.as_ref().is_none_or(|current| node.path.components().count() >= current.path.components().count()) {
+                            best = Some(node);
+                        }
+                    }
+                }
+            }
+        }
+        best.cloned()
+    }
     fn start_search(&mut self, cx: &mut Context<Self>) {
-        self.search_cancel.store(true, Ordering::Relaxed);
-        self.search_cancel = Arc::new(AtomicBool::new(false)); self.search_generation += 1;
-        self.search_update = SearchUpdate::default(); self.search_error = None;
-        self.searching = !self.query.trim().is_empty();
-        if !self.searching { cx.notify(); return; }
+        let tab = &mut self.tabs[self.active];
+        tab.search_cancel.store(true, Ordering::Relaxed);
+        tab.search_cancel = Arc::new(AtomicBool::new(false)); tab.search_generation += 1;
+        tab.search_update = SearchUpdate::default(); tab.search_error = None;
+        tab.searching = !tab.query.trim().is_empty();
+        if !tab.searching { cx.notify(); return; }
         self.analysis_tab = 0;
-        let generation = self.search_generation; let cancel = self.search_cancel.clone();
-        let query = self.query.trim().to_owned(); let path = self.tabs[self.active].history.current().to_owned();
-        let recursive = self.recursive; let hidden = self.hidden;
-        let (sender, receiver) = async_channel::bounded(1);
+        let generation = tab.search_generation; let cancel = tab.search_cancel.clone();
+        let query = tab.query.trim().to_owned(); let path = tab.history.current().to_owned();
+        let id = tab.id; let hidden = self.hidden;
+        let indexed = self.indexed_node(&path);
+        let (sender, receiver) = async_channel::bounded(8);
         cx.spawn(async move |this, cx| {
             while let Ok(update) = receiver.recv().await {
-                if this.update(cx, |this, cx| { if this.search_generation == generation && this.searching {this.search_update = update; cx.notify();} }).is_err() {break;}
+                if this.update(cx, |this, cx| {
+                    if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == id && tab.search_generation == generation && tab.searching) {
+                        tab.search_update = update; cx.notify();
+                    }
+                }).is_err() {break;}
             }
         }).detach();
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(180)).await;
             if cancel.load(Ordering::Relaxed) { return; }
-            let result = cx.background_spawn(async move { search(&path, &query, recursive, hidden, cancel, |update| { let _ = sender.try_send(update); }) }).await;
+            let result = cx.background_spawn(async move {
+                if let Some(node) = indexed {
+                    search_tree(&node, &query, hidden, cancel, |update| { let _ = sender.try_send(update); })
+                } else {
+                    search(&path, &query, true, hidden, cancel, |update| { let _ = sender.try_send(update); })
+                }
+            }).await;
             let _ = this.update(cx, |this, cx| {
-                if this.search_generation != generation { return; }
-                this.searching = false;
-                match result {Ok(update) => this.search_update = update, Err(error) => this.search_error = Some(error)}
-                cx.notify();
+                if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == id && tab.search_generation == generation) {
+                    tab.searching = false;
+                    match result {Ok(update) => tab.search_update = update, Err(error) => tab.search_error = Some(error)}
+                    cx.notify();
+                }
             });
         }).detach();
         cx.notify();
@@ -238,7 +324,7 @@ impl Browser {
         }
     }
     fn rows(&self) -> Vec<FileRow> {
-        if !self.query.trim().is_empty() { return self.search_update.results.iter().cloned().map(|entry| FileRow {entry, depth: 0}).collect(); }
+        if !self.tabs[self.active].query.trim().is_empty() { return self.tabs[self.active].search_update.results.iter().cloned().map(|entry| FileRow {entry, depth: 0}).collect(); }
         fn visit(browser: &Browser, entries: &[Entry], depth: usize, output: &mut Vec<FileRow>) {
             let tab = &browser.tabs[browser.active];
             let mut entries = entries.iter().filter(|entry| browser.hidden || !entry.name.starts_with('.')).collect::<Vec<_>>();
@@ -261,8 +347,10 @@ impl Browser {
         let mut output = vec![]; visit(self, &self.tabs[self.active].entries, 0, &mut output); output
     }
     fn entry_size(&self, entry: &Entry) -> Option<u64> {
-        if let Some(node) = self.sizes.get(&entry.path) {Some(node.weight(self.allocated))}
-        else if entry.is_dir {None} else {Some(if self.allocated {entry.allocated} else {entry.bytes})}
+        for analysis in self.analyses.iter().rev() {
+            if let Some(node) = analysis.sizes.get(&entry.path) { return Some(node.weight(self.allocated)); }
+        }
+        if entry.is_dir {None} else {Some(if self.allocated {entry.allocated} else {entry.bytes})}
     }
     fn move_selection(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.rows(); if rows.is_empty() {return;}
@@ -271,17 +359,39 @@ impl Browser {
         self.list_scroll.scroll_to_item(index, if forward {ScrollStrategy::Bottom}else{ScrollStrategy::Top});
         self.select(rows[index].entry.clone(), window, cx);
     }
-    fn start_scan(&mut self, cx: &mut Context<Self>) {
-        self.scan_cancel.store(true, Ordering::Relaxed); self.scan_cancel = Arc::new(AtomicBool::new(false)); self.scan_generation += 1;
-        let generation = self.scan_generation; let cancel = self.scan_cancel.clone();
-        let path = self.tabs[self.active].history.current().to_owned(); self.scan_root = Some(path.clone());
-        self.scanning = true; self.scan_progress = ScanProgress::default(); self.scan_error = None;
-        self.scan = None; self.sizes = Arc::new(HashMap::new()); self.largest.clear(); self.largest_logical.clear(); self.largest_allocated.clear();
-        self.tree_nodes = Arc::new(HashMap::new()); self.tree.update(cx, |tree, cx| tree.set_items(vec![], cx));
+    fn enqueue_scan(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(existing) = self.analyses.iter_mut().find(|analysis| analysis.path == path) {
+            if existing.scanning || existing.queued { cx.notify(); return; }
+            existing.queued = true; existing.scan = None; existing.error = None; existing.progress = ScanProgress::default();
+            existing.sizes = Arc::new(HashMap::new()); existing.largest_logical.clear(); existing.largest_allocated.clear();
+        } else {
+            self.analyses.push(Analysis {
+                id: self.next_analysis, path, cancel: Arc::new(AtomicBool::new(false)), scanning: false, queued: true,
+                progress: ScanProgress::default(), scan: None, sizes: Arc::new(HashMap::new()),
+                largest_logical: vec![], largest_allocated: vec![], error: None,
+            });
+            self.next_analysis += 1;
+        }
+        self.pump_queue(cx); cx.notify();
+    }
+    fn pump_queue(&mut self, cx: &mut Context<Self>) {
+        if self.analyses.iter().any(|analysis| analysis.scanning) { return; }
+        let Some(index) = self.analyses.iter().position(|analysis| analysis.queued && !analysis.scanning) else { return; };
+        self.start_analysis(index, cx);
+    }
+    fn start_analysis(&mut self, index: usize, cx: &mut Context<Self>) {
+        let analysis = &mut self.analyses[index];
+        analysis.cancel = Arc::new(AtomicBool::new(false));
+        analysis.scanning = true; analysis.queued = false; analysis.error = None;
+        let generation = analysis.id; let cancel = analysis.cancel.clone(); let path = analysis.path.clone();
         let (sender, receiver) = async_channel::bounded(1);
         cx.spawn(async move |this, cx| {
             while let Ok(progress) = receiver.recv().await {
-                if this.update(cx, |this, cx| {if this.scan_generation == generation && this.scanning {this.scan_progress = progress; cx.notify();}}).is_err() {break;}
+                if this.update(cx, |this, cx| {
+                    if let Some(analysis) = this.analyses.iter_mut().find(|analysis| analysis.id == generation && analysis.scanning) {
+                        analysis.progress = progress; cx.notify();
+                    }
+                }).is_err() {break;}
             }
         }).detach();
         cx.spawn(async move |this, cx| {
@@ -295,25 +405,56 @@ impl Browser {
                 })
             }).await;
             let _ = this.update(cx, |this, cx| {
-                if this.scan_generation != generation {return;}
-                this.scanning = false;
-                match result {Ok((scan, sizes, logical, allocated)) => {
-                    this.scan_progress.files = scan.root.files; this.scan_progress.logical = scan.root.logical; this.scan_progress.allocated = scan.root.allocated; this.scan_progress.skipped = scan.skipped;
-                    this.scan = Some(scan); this.sizes = sizes; this.largest_logical = logical; this.largest_allocated = allocated;
-                    this.largest = if this.allocated {this.largest_allocated.clone()}else{this.largest_logical.clone()};
-                    this.rebuild_storage_tree(cx);
-                }, Err(error) => this.scan_error = Some(error)}
-                cx.notify();
+                if let Some(analysis) = this.analyses.iter_mut().find(|analysis| analysis.id == generation) {
+                    analysis.scanning = false;
+                    match result {Ok((scan, sizes, logical, allocated)) => {
+                        analysis.progress.files = scan.root.files; analysis.progress.logical = scan.root.logical; analysis.progress.allocated = scan.root.allocated; analysis.progress.skipped = scan.skipped;
+                        analysis.scan = Some(scan); analysis.sizes = sizes; analysis.largest_logical = logical; analysis.largest_allocated = allocated;
+                    }, Err(error) => analysis.error = Some(error)}
+                }
+                this.rebuild_storage_tree(cx); this.pump_queue(cx); cx.notify();
             });
-        }).detach(); cx.notify();
+        }).detach();
+    }
+    fn current_analysis(&self) -> Option<&Analysis> {
+        let path = self.tabs[self.active].history.current();
+        self.analyses.iter().rev().find(|analysis| path.starts_with(&analysis.path) && (analysis.scan.is_some() || analysis.scanning || analysis.queued))
+    }
+    fn analysis_banner(&self) -> String {
+        let waiting = self.analyses.iter().filter(|analysis| analysis.queued).count();
+        if let Some(scan) = self.analyses.iter().find(|analysis| analysis.scanning) {
+            let root_name = scan.path.file_name().unwrap_or(scan.path.as_os_str()).to_string_lossy();
+            let size = if self.allocated { scan.progress.allocated } else { scan.progress.logical };
+            let extra = if waiting > 0 { format!(" · {waiting} waiting") } else { String::new() };
+            return format!("Analyzing {root_name}… {} files · {} so far{extra}", scan.progress.files, support::bytes(size));
+        }
+        if let Some(error) = self.analyses.iter().rev().find_map(|analysis| analysis.error.clone()) {
+            return error;
+        }
+        if let Some(scan) = self.current_analysis() {
+            let root_name = scan.path.file_name().unwrap_or(scan.path.as_os_str()).to_string_lossy();
+            let size = if self.allocated { scan.progress.allocated } else { scan.progress.logical };
+            return format!("{root_name} · {} {} · {} files · {} skipped{}", support::bytes(size), if self.allocated {"on disk"} else {"file size"}, scan.progress.files, scan.progress.skipped, if waiting > 0 { format!(" · {waiting} queued") } else { String::new() });
+        }
+        format!("{waiting} analyses queued")
+    }
+    fn report_snapshot(&self) -> (ScanProgress, Vec<String>) {
+        match self.current_analysis() {
+            Some(analysis) => (analysis.progress.clone(), analysis.scan.as_ref().map(|scan| scan.warnings.clone()).unwrap_or_default()),
+            None => (ScanProgress::default(), vec![]),
+        }
+    }
+    fn start_scan(&mut self, cx: &mut Context<Self>) {
+        let path = self.tabs[self.active].history.current().to_owned();
+        self.enqueue_scan(path, cx);
     }
     fn clear_scan(&mut self, cx: &mut Context<Self>) {
-        self.scan_cancel.store(true, Ordering::Relaxed); self.scan_generation += 1; self.scanning = false;
-        self.scan = None; self.scan_root = None; self.scan_error = None; self.sizes = Arc::new(HashMap::new()); self.largest.clear(); self.largest_logical.clear(); self.largest_allocated.clear(); self.analysis_tab = 0;
+        for analysis in &self.analyses { analysis.cancel.store(true, Ordering::Relaxed); }
+        self.analyses.clear(); self.analysis_tab = 0;
         self.tree_nodes = Arc::new(HashMap::new()); self.tree.update(cx, |tree, cx| tree.set_items(vec![], cx)); cx.notify();
     }
     fn rebuild_storage_tree(&mut self, cx: &mut Context<Self>) {
-        if let Some(scan) = &self.scan {
+        if let Some(scan) = self.current_analysis().and_then(|analysis| analysis.scan.clone()) {
             let mut expanded = HashSet::new();
             let selected_id = self.tree.read(cx).selected_item().map(|item| item.id.clone());
             if let Some(root) = self.tree.read(cx).entry(0) {collect_expanded(root.item(), &mut expanded);}
@@ -324,7 +465,64 @@ impl Browser {
                 tree.set_items(vec![item], cx);
                 if let Some(id) = selected_id {let index = tree.index_of(&id); tree.set_selected_index(index, cx);}
             });
+        } else {
+            self.tree_nodes = Arc::new(HashMap::new());
+            self.tree.update(cx, |tree, cx| tree.set_items(vec![], cx));
         }
+    }
+    fn apply_result(&mut self, result: Result<PathBuf, String>, window: &mut Window, cx: &mut Context<Self>) {
+        match result {
+            Ok(path) => {
+                self.tabs[self.active].status.clear();
+                if let Some(parent) = path.parent() {
+                    if parent == self.tabs[self.active].history.current() { self.refresh(window, cx); }
+                    else { self.navigate(parent.to_owned(), window, cx); }
+                } else { self.refresh(window, cx); }
+            }
+            Err(error) => { self.tabs[self.active].status = error; cx.notify(); }
+        }
+    }
+    fn begin_rename(&mut self, entry: Option<Entry>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = entry.or_else(|| self.tabs[self.active].selected.clone()) else { return; };
+        self.rename = Some(entry.path.clone());
+        self.rename_input.update(cx, |input, cx| { input.set_value(entry.name.clone(), window, cx); });
+        self.rename_input.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.rename.take() else { return; };
+        let name = self.rename_input.read(cx).value().to_string();
+        self.apply_result(rename_entry(&path, &name), window, cx);
+    }
+    fn trash_entry(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+        let result = move_to_trash(&entry.path).map(|_| entry.path.clone());
+        self.apply_result(result, window, cx);
+    }
+    fn delete_entry(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_delete = None;
+        let result = delete_permanently(&entry.path).map(|_| entry.path.clone());
+        self.apply_result(result, window, cx);
+    }
+    fn duplicate_selected(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_result(duplicate_entry(&entry.path), window, cx);
+    }
+    fn new_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let parent = self.tabs[self.active].history.current().to_owned();
+        match create_folder(&parent, "untitled folder") {
+            Ok(path) => {
+                self.refresh(window, cx);
+                self.begin_rename(Some(Entry { path: path.clone(), name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), is_dir: true, is_symlink: false, bytes: 0, allocated: 0, modified: None }), window, cx);
+            }
+            Err(error) => { self.tabs[self.active].status = error; cx.notify(); }
+        }
+    }
+    fn show_info(&mut self, entry: Option<Entry>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = entry { self.select(entry, window, cx); }
+        self.inspector_open = true; self.detail_tab = 1; cx.notify();
+    }
+    fn copy_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(path.to_string_lossy().into_owned()));
+        self.tabs[self.active].status = "Path copied.".into(); cx.notify();
     }
     fn save_preferences(&mut self) {
         self.preference_status = match preferences_path() {
@@ -334,7 +532,6 @@ impl Browser {
     }
     fn set_metric(&mut self, value: bool, cx: &mut Context<Self>) {
         self.allocated = value;
-        self.largest = if value {self.largest_allocated.clone()}else{self.largest_logical.clone()};
         self.rebuild_storage_tree(cx); self.save_preferences(); cx.notify();
     }
     #[gpui]
@@ -343,7 +540,7 @@ impl Browser {
         let selected = self.tabs[self.active].selected.as_ref().is_some_and(|selected| selected.path == entry.path);
         let expanded = self.tabs[self.active].expanded.contains(&entry.path);
         let loading = self.tabs[self.active].loading_children.contains(&entry.path);
-        let is_search = !self.query.trim().is_empty();
+        let is_search = !self.tabs[self.active].query.trim().is_empty();
         let size = self.entry_size(&entry).map(support::bytes).unwrap_or_else(|| "—".into());
         let name = entry.name.clone(); let kind = entry.kind();
         let modified = entry.modified.map(chrono::DateTime::<chrono::Local>::from).map(|time| time.format("%d %b %Y %H:%M").to_string()).unwrap_or_else(|| "—".into());
@@ -356,13 +553,16 @@ impl Browser {
         } else {<div w={px(20.)} flex-shrink-0 />.into_any_element()};
         let location = entry.path.parent().unwrap_or(Path::new("/")).strip_prefix(self.tabs[self.active].history.current()).unwrap_or(entry.path.parent().unwrap_or(Path::new("/"))).to_string_lossy().into_owned();
         let compact = f32::from(window.bounds().size.width) < 1000. || self.inspector_open;
+        let owner = cx.entity();
+        let menu_entry = entry.clone();
         <div id={("file",index)} role={Role::Row} aria-label={accessible_name} aria-selected={selected} h={px(if is_search {48.}else{29.})} w-full flex items-center gap-3 px-3 cursor-pointer rounded-md
             bg={if selected {cx.theme().list_active}else if index%2==1 {cx.theme().muted}else{cx.theme().background}}
             hover={|style|style.bg(cx.theme().list_hover)}
             on-click={cx.listener(move |this,event:&ClickEvent,window,cx|{
-                this.select(entry.clone(),window,cx);
-                if event.click_count()>=2 {this.open_selection(window,cx);}
-            })}>
+            this.select(entry.clone(),window,cx);
+            if event.click_count()>=2 {this.open_selection(window,cx);}
+            })}
+            context-menu={move |menu, window, cx| fill_file_menu(menu, owner.clone(), menu_entry.clone(), window, cx)}>
             <div flex flex-1 min-w-0 items-center gap-2 pl={px(row.depth as f32*16.)}>
                 {disclosure}<Icon args={icon} size={px(15.)} text-color={if kind=="Folder" {cx.theme().link}else{cx.theme().muted_foreground}} />
                 <div flex flex-col flex-1 min-w-0>
@@ -388,7 +588,7 @@ impl Browser {
             }).collect::<Vec<_>>();
         let content = if count == 0 {
             let tab = &self.tabs[self.active];
-            let message = if let Some(error)=&self.search_error {error.clone()} else if !tab.status.is_empty(){tab.status.clone()}else if self.searching {"Searching this folder…".into()}else if tab.loading {"Opening folder…".into()}else if !self.query.trim().is_empty(){"No matching files".into()}else{"This folder is empty".into()};
+            let message = if let Some(error)=&tab.search_error {error.clone()} else if !tab.status.is_empty(){tab.status.clone()}else if tab.searching {"Searching this folder and subfolders…".into()}else if tab.loading {"Opening folder…".into()}else if !tab.query.trim().is_empty(){"No matching files".into()}else{"This folder is empty".into()};
             <div flex flex-col flex-1 items-center justify-center gap-3 text-color={cx.theme().muted_foreground}>
                 <Icon args={if self.search_open {IconName::Search}else{IconName::FolderOpen}} size={px(32.)} /><div>{message}</div>
             </div>.into_any_element()
@@ -402,8 +602,9 @@ impl Browser {
     }
     #[gpui]
     fn storage(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(scan) = &self.scan else {
-            return <div flex size-full items-center justify-center text-color={cx.theme().muted_foreground}>{if self.scanning {"Storage analysis is running. You can keep browsing."}else{"Run an analysis to explore folder sizes."}}</div>.into_any_element();
+        let Some(scan) = self.current_analysis().and_then(|analysis| analysis.scan.clone()) else {
+            let scanning = self.current_analysis().is_some_and(|analysis| analysis.scanning || analysis.queued);
+            return <div flex size-full items-center justify-center text-color={cx.theme().muted_foreground}>{if scanning {"Storage analysis is running. You can keep browsing."}else{"Run an analysis to explore folder sizes."}}</div>.into_any_element();
         };
         let nodes = self.tree_nodes.clone(); let allocated = self.allocated; let total = scan.root.weight(allocated);
         let rows = tree(&self.tree, move |index, entry, selected, _, cx| {
@@ -423,14 +624,19 @@ impl Browser {
     }
     #[gpui]
     fn largest_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let files = Arc::new(self.largest.iter().filter(|node|self.hidden || !has_hidden_component(&node.path,self.scan_root.as_deref().unwrap_or(Path::new("/")))).cloned().collect::<Vec<_>>());
+        let analysis = self.current_analysis();
+        let root = analysis.map(|analysis| analysis.path.as_path()).unwrap_or(Path::new("/"));
+        let files = Arc::new(analysis.map(|analysis| {
+            let files = if self.allocated { &analysis.largest_allocated } else { &analysis.largest_logical };
+            files.iter().filter(|node|self.hidden || !has_hidden_component(&node.path, root)).cloned().collect::<Vec<_>>()
+        }).unwrap_or_default());
         let count = files.len(); let owner = cx.entity(); let allocated = self.allocated;
         <uniform_list args={("largest-files",count,move|range,_,cx|owner.update(cx,|_,cx|range.map(|i|{
             let node=files[i].clone(); let name=node.name(); let path=node.path.to_string_lossy().into_owned();
             <div id={("large",i)} h={px(48.)} px-4 flex items-center gap-3 cursor-pointer hover={|style|style.bg(cx.theme().list_hover)} on-click={cx.listener(move|this,_,window,cx|this.select(entry_from_node(&node),window,cx))}>
-                <Icon args={IconName::File} small /><div flex flex-col flex-1 min-w-0><div truncate>{name}</div><div text-xs truncate text-color={cx.theme().muted_foreground}>{path}</div></div><div>{support::bytes(files[i].weight(allocated))}</div>
+            <Icon args={IconName::File} small /><div flex flex-col flex-1 min-w-0><div truncate>{name}</div><div text-xs truncate text-color={cx.theme().muted_foreground}>{path}</div></div><div>{support::bytes(files[i].weight(allocated))}</div>
             </div>.into_any_element()
-        }).collect::<Vec<_>>()))} size-full />.into_any_element()
+            }).collect::<Vec<_>>()))} size-full />.into_any_element()
     }
     #[gpui]
     fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -462,6 +668,34 @@ impl Browser {
             <div id="inspector-scroll" flex-1 min-h-0 overflow-y-scroll p-4 whitespace-normal>{content}</div>
         </div>.into_any_element()
     }
+    #[gpui]
+    fn folder_tabs(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
+            let selected = index == self.active;
+            let id = tab.id;
+            let label = tab.history.current().file_name().unwrap_or(tab.history.current().as_os_str()).to_string_lossy().into_owned();
+            let close = self.tabs.len() > 1;
+            <div id={("nav-tab", id)} h={px(28.)} px-3 flex items-center gap-2 rounded-lg cursor-pointer flex-shrink-0
+                bg={if selected {cx.theme().background} else {cx.theme().sidebar}}
+                on-mouse-down:args={(MouseButton::Left, cx.listener(move |this, _, _, cx| { this.dragging_tab = Some(index); this.active = index; cx.notify(); }))}
+                on-mouse-move={cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                    if event.dragging() {
+                        if let Some(from) = this.dragging_tab { this.move_tab(from, index); this.sync_address(window, cx); cx.notify(); }
+                    }
+                })}
+                on-mouse-up:args={(MouseButton::Left, cx.listener(move |this, _, window, cx| { this.dragging_tab = None; this.activate_tab(index, window, cx); }))}>
+                <Icon args={IconName::Folder} size={px(12.)} text-color={cx.theme().link} />
+                <div text-xs truncate max-w={px(140.)}>{label}</div>
+                {if close {
+                    <Button args={format!("close-tab-{id}")} ghost xsmall icon={IconName::Close} on-click={cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.close_tab_at(index, window, cx); })} />.into_any_element()
+                } else { <div />.into_any_element() }}
+            </div>.into_any_element()
+        }).collect::<Vec<_>>();
+        <div flex items-center gap-1 px-2 py-1 bg={cx.theme().sidebar} border-b-1 border-color={cx.theme().border}>
+            <div flex items-center gap-1 flex-1 min-w-0 overflow-x-hidden children={tabs} />
+            <Button args={"new-tab"} ghost xsmall icon={IconName::Plus} accessibility-label="New Tab" on-click={cx.listener(|this, _, window, cx| this.add_tab(this.tabs[this.active].history.current().to_owned(), window, cx))} />
+        </div>.into_any_element()
+    }
     fn place(&self, id: usize, label: &'static str, icon: IconName, path: PathBuf, cx: &mut Context<Self>) -> AnyElement {
         Button::new(("place", id)).accessibility_label(label).ghost().w_full()
             .selected(self.tabs[self.active].history.current()==path)
@@ -481,10 +715,10 @@ impl Browser {
             {self.place(100,"Filesystem",IconName::HardDrive,"/".into(),cx)}
             <div flex-1 />
             <Button args={"show-hidden"} accessibility-label="Toggle hidden files" ghost small w-full selected={self.hidden} on-click={cx.listener(|this,_,_,cx|this.toggle_hidden(cx))}>
-                <div flex items-center gap-2 w-full><Icon args={IconName::Eye} small /><div>{if self.hidden {"Hidden files visible"}else{"Show hidden files"}}</div></div>
+            <div flex items-center gap-2 w-full><Icon args={IconName::Eye} small /><div>{if self.hidden {"Hidden files visible"}else{"Show hidden files"}}</div></div>
             </Button>
             <Button args={"settings"} accessibility-label="Settings" ghost small w-full selected={self.settings_open} on-click={cx.listener(|this,_,_,cx|{this.settings_open=!this.settings_open;cx.notify();})}>
-                <div flex items-center gap-2 w-full><Icon args={IconName::Settings} small /><div>Settings</div></div>
+            <div flex items-center gap-2 w-full><Icon args={IconName::Settings} small /><div>Settings</div></div>
             </Button>
         </div>.into_any_element()
     }
@@ -506,98 +740,126 @@ impl Browser {
 impl Render for Browser {
     #[gpui]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let path=self.tabs[self.active].history.current().to_owned();
-        let title=path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
-        let can_back=self.tabs[self.active].history.index>0;
-        let can_forward=self.tabs[self.active].history.index+1<self.tabs[self.active].history.paths.len();
-        let has_scan=self.scan_root.is_some();
-        let status=if self.searching {format!("Searching… {} items checked · {} matches · {} folders",self.search_update.visited,self.search_update.matches,self.search_update.folders)}
-            else if let Some(error)=&self.search_error {error.clone()}
-            else if !self.query.trim().is_empty(){format!("{} matches · showing {} · {} skipped",self.search_update.matches,self.search_update.results.len(),self.search_update.skipped)}
-            else if self.tabs[self.active].loading {"Opening folder…".into()}
-            else if !self.tabs[self.active].status.is_empty(){self.tabs[self.active].status.clone()}
-            else{format!("{} items{}",self.rows().len(),if self.tabs[self.active].unreadable>0{format!(" · {} unreadable",self.tabs[self.active].unreadable)}else{String::new()})};
-        let content=if self.settings_open {self.settings(cx)}else{
-            let analysis=match self.analysis_tab {
-                1=>self.storage(cx),2=>self.largest_view(cx),3=>{
-                    let warnings=self.scan.as_ref().map(|scan|scan.warnings.clone()).unwrap_or_default().into_iter().map(|warning|<div text-xs py-2>{warning}</div>).collect::<Vec<_>>();
-                    <div id="report" size-full overflow-y-scroll p-4 flex flex-col gap-3 whitespace-normal><div font-semibold>Scan report</div><div text-sm>Totals include hidden items. Symbolic links and special files are skipped. On Unix, hard links count once and scanning stays on the starting filesystem.</div><div text-sm>{format!("{} files · {} skipped",self.scan_progress.files,self.scan_progress.skipped)}</div><div flex flex-col children={warnings} /></div>.into_any_element()
-                },_=>self.files(window,cx),
+        let tab = &self.tabs[self.active];
+        let can_back = tab.history.index > 0;
+        let can_forward = tab.history.index + 1 < tab.history.paths.len();
+        let searching = tab.searching;
+        let has_scan = !self.analyses.is_empty();
+        let status = if searching { format!("Searching… {} items checked · {} matches · {} folders", tab.search_update.visited, tab.search_update.matches, tab.search_update.folders) }
+            else if let Some(error) = &tab.search_error { error.clone() }
+            else if !tab.query.trim().is_empty() { format!("{} matches · showing {} · {} skipped", tab.search_update.matches, tab.search_update.results.len(), tab.search_update.skipped) }
+            else if tab.loading { "Opening folder…".into() }
+            else if !tab.status.is_empty() { tab.status.clone() }
+            else { format!("{} items{}", self.rows().len(), if tab.unreadable > 0 { format!(" · {} unreadable", tab.unreadable) } else { String::new() }) };
+        let rename_open = self.rename.is_some();
+        let confirm = self.confirm_delete.clone();
+        let content = if self.settings_open { self.settings(cx) } else {
+            let (progress, warnings) = self.report_snapshot();
+            let banner = self.analysis_banner();
+            let scanning = self.analyses.iter().any(|analysis| analysis.scanning);
+            let analysis = match self.analysis_tab {
+                1 => self.storage(cx),
+                2 => self.largest_view(cx),
+                3 => {
+                    let warnings = warnings.into_iter().map(|warning| <div text-xs py-2>{warning}</div>).collect::<Vec<_>>();
+                    <div id="report" size-full overflow-y-scroll p-4 flex flex-col gap-3 whitespace-normal><div font-semibold>Scan report</div><div text-sm>Totals include hidden items. Symbolic links and special files are skipped. On Unix, hard links count once and scanning stays on the starting filesystem.</div><div text-sm>{format!("{} files · {} skipped", progress.files, progress.skipped)}</div><div flex flex-col children={warnings} /></div>.into_any_element()
+                },
+                _ => self.files(window, cx),
             };
-            let mut panes=h_resizable("file-content").child(resizable_panel().child(analysis));
-            if self.inspector_open {panes=panes.child(resizable_panel().size(px(290.)).size_range(px(240.)..px(460.)).child(self.inspector(cx)));}
+            let mut panes = h_resizable("file-content").child(resizable_panel().child(analysis));
+            if self.inspector_open { panes = panes.child(resizable_panel().size(px(290.)).size_range(px(240.)..px(460.)).child(self.inspector(cx))); }
             <div flex flex-col size-full min-h-0>
-                {if self.tabs.len()>1 {
-                    let tabs=self.tabs.iter().map(|tab|<Tab label={tab.history.current().file_name().unwrap_or(tab.history.current().as_os_str()).to_string_lossy().into_owned()} />).collect::<Vec<_>>();
-                    <TabBar args={"folder-tabs"} selected-index={self.active} children={tabs} on-click={cx.listener(|this,index,window,cx|{this.active=*index;this.sync_address(window,cx);this.start_search(cx);cx.notify();})} />.into_any_element()
-                }else{<div />.into_any_element()}}
-                {if self.address_open {<div px-4 py-2><Input args={&self.address} /></div>.into_any_element()}else{<div />.into_any_element()}}
-                {if self.search_open {
-                    <div flex items-center gap-2 px-4 py-2 border-b-1 border-color={cx.theme().border}>
-                        <div text-xs text-color={cx.theme().muted_foreground}>Search in</div>
-                        <Button args={"scope-current"} label="This folder" small ghost selected={!self.recursive} on-click={cx.listener(|this,_,_,cx|{this.recursive=false;this.start_search(cx);})} />
-                        <Button args={"scope-recursive"} label="Include subfolders" small ghost selected={self.recursive} on-click={cx.listener(|this,_,_,cx|{this.recursive=true;this.start_search(cx);})} />
-                        <div flex-1 />{if self.searching {<Spinner small />.into_any_element()}else{<div />.into_any_element()}}
-                        <Button args={"stop-search"} label={if self.searching {"Stop"}else{"Clear"}} small ghost on-click={cx.listener(|this,_,window,cx|{if this.searching {this.search_cancel.store(true,Ordering::Relaxed);}else{this.search_input.update(cx,|input,cx|input.set_value("",window,cx));}})} />
-                    </div>.into_any_element()
-                }else{<div />.into_any_element()}}
                 {if has_scan {
-                    let root=self.scan_root.as_ref().unwrap(); let root_name=root.file_name().unwrap_or(root.as_os_str()).to_string_lossy();
-                    let size=if self.allocated {self.scan_progress.allocated}else{self.scan_progress.logical};
-                    let text=if let Some(error)=&self.scan_error {format!("{root_name} · {error}")}else if self.scanning {format!("Analyzing {root_name}… {} files · {} so far",self.scan_progress.files,support::bytes(size))}else{format!("{root_name} · {} {} · {} files · {} skipped",support::bytes(size),if self.allocated {"on disk"}else{"file size"},self.scan_progress.files,self.scan_progress.skipped)};
                     <div flex items-center gap-2 px-4 py-2 bg={cx.theme().muted}>
-                        {if self.scanning {<Spinner small />.into_any_element()}else{<Icon args={IconName::HardDrive} small />.into_any_element()}}<div flex-1 min-w-0 truncate text-xs>{text}</div>
-                        {if self.scanning {<Button args={"cancel-analysis"} label="Cancel" ghost small on-click={cx.listener(|this,_,_,cx|{this.scan_cancel.store(true,Ordering::Relaxed);cx.notify();})} />.into_any_element()}else{<div />.into_any_element()}}
-                        <Button args={"clear-analysis"} label="Clear" ghost small on-click={cx.listener(|this,_,_,cx|this.clear_scan(cx))} />
+                        {if scanning { <Spinner small />.into_any_element() } else { <Icon args={IconName::HardDrive} small />.into_any_element() }}
+                        <div flex-1 min-w-0 truncate text-xs>{banner}</div>
+                        {if scanning { <Button args={"cancel-analysis"} label="Cancel" ghost small on-click={cx.listener(|this,_,_,cx|{ if let Some(analysis) = this.analyses.iter().find(|analysis| analysis.scanning) { analysis.cancel.store(true, Ordering::Relaxed); } cx.notify(); })} />.into_any_element() } else { <div />.into_any_element() }}
+                        <Button args={"clear-analysis"} label="Clear" ghost small on-click={cx.listener(|this,_,_,cx| this.clear_scan(cx))} />
                     </div>.into_any_element()
-                }else{<div />.into_any_element()}}
+                } else { <div />.into_any_element() }}
                 {if has_scan {
-                    <TabBar args={"analysis-tabs"} selected-index={self.analysis_tab} on-click={cx.listener(|this,index,_,cx|{this.analysis_tab=*index;cx.notify();})}><Tab label="Files" /><Tab label="Storage tree" /><Tab label="Largest files" /><Tab label="Scan report" /></TabBar>.into_any_element()
-                }else{<div />.into_any_element()}}
+                    <TabBar args={"analysis-tabs"} selected-index={self.analysis_tab} on-click={cx.listener(|this,index,_,cx|{ this.analysis_tab=*index; cx.notify(); })}><Tab label="Files" /><Tab label="Storage tree" /><Tab label="Largest files" /><Tab label="Scan report" /></TabBar>.into_any_element()
+                } else { <div />.into_any_element() }}
                 <div flex-1 min-h-0>{panes}</div>
                 <div flex items-center gap-2 px-4 py-2 border-t-1 border-color={cx.theme().border} text-xs text-color={cx.theme().muted_foreground}>
-                    {if self.searching {<Spinner small />.into_any_element()}else{<div />.into_any_element()}}<div flex-1 min-w-0 truncate>{status}</div>
-                    <div>{if self.hidden {"Hidden files visible"}else{"Hidden files off"}}</div>
+                    {if searching { <Spinner small />.into_any_element() } else { <div />.into_any_element() }}<div flex-1 min-w-0 truncate>{status}</div>
+                    <div>{if self.hidden {"Hidden files visible"} else {"Hidden files off"}}</div>
                 </div>
-                <div px-4 py-2 border-t-1 border-color={cx.theme().border} text-xs truncate text-color={cx.theme().muted_foreground}>{path.to_string_lossy().into_owned()}</div>
             </div>.into_any_element()
         };
-        <div id="file-explorer" role={Role::Group} aria-label="File Explorer" key-context="FileExplorer" track-focus={&self.focus} flex size-full text-sm font-normal overflow-hidden bg={cx.theme().background} text-color={cx.theme().foreground}
-            on-action={cx.listener(|this,_:&Find,window,cx|{this.settings_open=false;this.search_open=true;this.search_input.read(cx).focus_handle(cx).focus(window,cx);cx.notify();})}
-            on-action={cx.listener(|this,_:&ToggleHidden,_,cx|this.toggle_hidden(cx))}
-            on-action={cx.listener(|this,_:&GoToFolder,window,cx|{this.address_open=true;this.address.read(cx).focus_handle(cx).focus(window,cx);cx.notify();})}
-            on-action={cx.listener(|this,_:&Back,window,cx|{this.tabs[this.active].history.back();this.refresh(window,cx);})}
-            on-action={cx.listener(|this,_:&Forward,window,cx|{this.tabs[this.active].history.forward();this.refresh(window,cx);})}
-            on-action={cx.listener(|this,_:&Parent,window,cx|{if let Some(parent)=this.tabs[this.active].history.current().parent(){this.navigate(parent.to_owned(),window,cx);}})}
-            on-action={cx.listener(|this,_:&NewTab,window,cx|this.add_tab(this.tabs[this.active].history.current().to_owned(),window,cx))}
-            on-action={cx.listener(|this,_:&CloseTab,window,cx|this.close_tab(window,cx))}
-            on-action={cx.listener(|this,_:&QuickLook,window,cx|{this.inspector_open=!this.inspector_open;this.detail_tab=0;if this.inspector_open {if let Some(entry)=this.tabs[this.active].selected.clone(){this.select(entry,window,cx);}}cx.notify();})}
-            on-action={cx.listener(|this,_:&OpenSelection,window,cx|this.open_selection(window,cx))}
-            on-action={cx.listener(|this,_:&NextItem,window,cx|this.move_selection(true,window,cx))}
-            on-action={cx.listener(|this,_:&PreviousItem,window,cx|this.move_selection(false,window,cx))}
-            on-action={cx.listener(|this,_:&ExpandItem,_,cx|{if let Some(entry)=this.tabs[this.active].selected.clone(){if entry.is_dir&&!this.tabs[this.active].expanded.contains(&entry.path){this.toggle_folder(entry.path,cx);}}})}
-            on-action={cx.listener(|this,_:&CollapseItem,_,cx|{if let Some(entry)=this.tabs[this.active].selected.clone(){if this.tabs[this.active].expanded.remove(&entry.path){cx.notify();}}})}
-            on-action={cx.listener(|this,_:&Dismiss,window,cx|{this.settings_open=false;this.address_open=false;this.inspector_open=false;this.search_open=false;this.query.clear();this.search_input.update(cx,|input,cx|input.set_value("",window,cx));this.start_search(cx);this.list_focus.focus(window,cx);cx.notify();})}
-            on-action={cx.listener(|this,_:&ShowSettings,_,cx|{this.settings_open=!this.settings_open;cx.notify();})}>
+        let overlay = if rename_open {
+            <div absolute inset-0 flex items-center justify-center bg={hsla(0., 0., 0., 0.35)}>
+                <div w={px(360.)} p-4 rounded-lg bg={cx.theme().background} border-1 border-color={cx.theme().border} flex flex-col gap-3>
+                    <div font-semibold>Rename</div>
+                    <Input args={&self.rename_input} />
+                    <div flex justify-end gap-2>
+                        <Button args={"cancel-rename"} ghost small label="Cancel" on-click={cx.listener(|this,_,_,cx|{ this.rename=None; cx.notify(); })} />
+                        <Button args={"save-rename"} small label="Save" on-click={cx.listener(|this,_,window,cx| this.commit_rename(window,cx))} />
+                    </div>
+                </div>
+            </div>.into_any_element()
+        } else if let Some(entry) = confirm {
+            let name = entry.name.clone();
+            <div absolute inset-0 flex items-center justify-center bg={hsla(0., 0., 0., 0.35)}>
+                <div w={px(380.)} p-4 rounded-lg bg={cx.theme().background} border-1 border-color={cx.theme().border} flex flex-col gap-3>
+                    <div font-semibold>Delete immediately?</div>
+                    <div text-sm whitespace-normal>{format!("{name} will be removed permanently. This cannot be undone.")}</div>
+                    <div flex justify-end gap-2>
+                        <Button args={"cancel-delete"} ghost small label="Cancel" on-click={cx.listener(|this,_,_,cx|{ this.confirm_delete=None; cx.notify(); })} />
+                        <Button args={"confirm-delete"} primary small label="Delete" on-click={cx.listener(move |this,_,window,cx| this.delete_entry(entry.clone(), window, cx))} />
+                    </div>
+                </div>
+            </div>.into_any_element()
+        } else { <div />.into_any_element() };
+        <div id="file-explorer" role={Role::Group} aria-label="File Explorer" key-context="FileExplorer" track-focus={&self.focus} relative flex size-full text-sm font-normal overflow-hidden bg={cx.theme().background} text-color={cx.theme().foreground}
+            on-action={cx.listener(|this,_:&Find,window,cx|{ this.settings_open=false; this.search_open=true; this.search_input.read(cx).focus_handle(cx).focus(window,cx); cx.notify(); })}
+            on-action={cx.listener(|this,_:&ToggleHidden,_,cx| this.toggle_hidden(cx))}
+            on-action={cx.listener(|this,_:&GoToFolder,window,cx|{ this.address.read(cx).focus_handle(cx).focus(window,cx); cx.notify(); })}
+            on-action={cx.listener(|this,_:&Back,window,cx|{ this.tabs[this.active].history.back(); this.refresh(window,cx); })}
+            on-action={cx.listener(|this,_:&Forward,window,cx|{ this.tabs[this.active].history.forward(); this.refresh(window,cx); })}
+            on-action={cx.listener(|this,_:&Parent,window,cx|{ if let Some(parent)=this.tabs[this.active].history.current().parent() { this.navigate(parent.to_owned(), window, cx); } })}
+            on-action={cx.listener(|this,_:&NewTab,window,cx| this.add_tab(this.tabs[this.active].history.current().to_owned(), window, cx))}
+            on-action={cx.listener(|this,_:&CloseTab,window,cx| this.close_tab(window,cx))}
+            on-action={cx.listener(|this,_:&QuickLook,window,cx|{ this.inspector_open=!this.inspector_open; this.detail_tab=0; if this.inspector_open { if let Some(entry)=this.tabs[this.active].selected.clone() { this.select(entry,window,cx); } } cx.notify(); })}
+            on-action={cx.listener(|this,_:&OpenSelection,window,cx| this.open_selection(window,cx))}
+            on-action={cx.listener(|this,_:&NextItem,window,cx| this.move_selection(true,window,cx))}
+            on-action={cx.listener(|this,_:&PreviousItem,window,cx| this.move_selection(false,window,cx))}
+            on-action={cx.listener(|this,_:&ExpandItem,_,cx|{ if let Some(entry)=this.tabs[this.active].selected.clone() { if entry.is_dir && !this.tabs[this.active].expanded.contains(&entry.path) { this.toggle_folder(entry.path,cx); } } })}
+            on-action={cx.listener(|this,_:&CollapseItem,_,cx|{ if let Some(entry)=this.tabs[this.active].selected.clone() { if this.tabs[this.active].expanded.remove(&entry.path) { cx.notify(); } } })}
+            on-action={cx.listener(|this,_:&RenameItem,window,cx| this.begin_rename(None, window, cx))}
+            on-action={cx.listener(|this,_:&GetInfo,window,cx| this.show_info(None, window, cx))}
+            on-action={cx.listener(|this,_:&MoveToTrash,window,cx|{ if let Some(entry)=this.tabs[this.active].selected.clone() { this.trash_entry(entry, window, cx); } })}
+            on-action={cx.listener(|this,_:&NewFolder,window,cx| this.new_folder(window, cx))}
+            on-action={cx.listener(|this,_:&Dismiss,window,cx|{
+                if this.rename.take().is_some() || this.confirm_delete.take().is_some() { cx.notify(); return; }
+                this.settings_open=false; this.inspector_open=false; this.search_open=false;
+                this.tabs[this.active].query.clear();
+                this.search_input.update(cx,|input,cx| input.set_value("", window, cx));
+                this.start_search(cx); this.list_focus.focus(window,cx); cx.notify();
+            })}
+            on-action={cx.listener(|this,_:&ShowSettings,_,cx|{ this.settings_open=!this.settings_open; cx.notify(); })}>
             <div w={px(180.)} flex-shrink-0 border-r-1 border-color={cx.theme().border}>{self.sidebar(cx)}</div>
             <div flex flex-col flex-1 min-w-0 min-h-0>
-                <div flex items-center gap-2 px-4 h={px(58.)} flex-shrink-0 border-b-1 border-color={cx.theme().border}>
-                    <Button args={"back"} accessibility-label="Back" icon={IconName::ChevronLeft} ghost small disabled={!can_back} on-click={cx.listener(|this,_,window,cx|{this.tabs[this.active].history.back();this.refresh(window,cx);})} />
-                    <Button args={"forward"} accessibility-label="Forward" icon={IconName::ChevronRight} ghost small disabled={!can_forward} on-click={cx.listener(|this,_,window,cx|{this.tabs[this.active].history.forward();this.refresh(window,cx);})} />
-                    <div flex-1 min-w-0 truncate font-semibold>{if self.settings_open {"Settings".into()}else{title}}</div>
-                    <Button args={"analyze-space"} label="Analyze space" icon={IconName::HardDrive} small ghost disabled={self.scanning} on-click={cx.listener(|this,_,_,cx|this.start_scan(cx))} />
-                    <Button args={"inspector-toggle"} accessibility-label="Toggle inspector" icon={IconName::PanelRight} small ghost selected={self.inspector_open} on-click={cx.listener(|this,_,_,cx|{this.inspector_open=!this.inspector_open;cx.notify();})} />
+                {self.folder_tabs(cx)}
+                <div flex items-center gap-2 px-4 h={px(52.)} flex-shrink-0 border-b-1 border-color={cx.theme().border}>
+                    <Button args={"back"} accessibility-label="Back" icon={IconName::ChevronLeft} ghost small disabled={!can_back} on-click={cx.listener(|this,_,window,cx|{ this.tabs[this.active].history.back(); this.refresh(window,cx); })} />
+                    <Button args={"forward"} accessibility-label="Forward" icon={IconName::ChevronRight} ghost small disabled={!can_forward} on-click={cx.listener(|this,_,window,cx|{ this.tabs[this.active].history.forward(); this.refresh(window,cx); })} />
+                    <div flex-1 min-w-0>{if self.settings_open { <div font-semibold>Settings</div>.into_any_element() } else { <Input args={&self.address} small />.into_any_element() }}</div>
+                    <Button args={"analyze-space"} label="Analyze space" icon={IconName::HardDrive} small ghost on-click={cx.listener(|this,_,_,cx| this.start_scan(cx))} />
+                    <Button args={"inspector-toggle"} accessibility-label="Toggle inspector" icon={IconName::PanelRight} small ghost selected={self.inspector_open} on-click={cx.listener(|this,_,_,cx|{ this.inspector_open=!this.inspector_open; cx.notify(); })} />
                     <Button args={"browse"} accessibility-label="Choose folder" icon={IconName::FolderOpen} small ghost on-click={cx.listener(|_,_,window,cx|{
                         let choice=cx.prompt_for_paths(PathPromptOptions{files:false,directories:true,multiple:false,prompt:Some("Open folder".into())});
                         cx.spawn_in(window,async move|this,cx|{if let Ok(Ok(Some(paths)))=choice.await{if let Some(path)=paths.into_iter().next(){let _=this.update_in(cx,|this,window,cx|this.navigate(path,window,cx));}}}).detach();
-                    })} />
-                    {if self.search_open {<div w={px(220.)}><Input args={&self.search_input} small /></div>.into_any_element()}else{<Button args={"find"} accessibility-label="Find files" icon={IconName::Search} small ghost on-click={cx.listener(|this,_,window,cx|{this.search_open=true;this.search_input.read(cx).focus_handle(cx).focus(window,cx);cx.notify();})} />.into_any_element()}}
+                        })} />
+                    {if self.search_open { <div w={px(240.)}><Input args={&self.search_input} small /></div>.into_any_element() } else { <Button args={"find"} accessibility-label="Find files" icon={IconName::Search} small ghost on-click={cx.listener(|this,_,window,cx|{ this.search_open=true; this.search_input.read(cx).focus_handle(cx).focus(window,cx); cx.notify(); })} />.into_any_element() }}
                 </div>
                 <div flex-1 min-h-0>{content}</div>
             </div>
+            {overlay}
         </div>
     }
 }
+
 fn apply_appearance(appearance: Appearance, window: &mut Window, cx: &mut App) {
     match appearance {Appearance::System=>Theme::sync_system_appearance(Some(window),cx),Appearance::Light=>Theme::change(ThemeMode::Light,Some(window),cx),Appearance::Dark=>Theme::change(ThemeMode::Dark,Some(window),cx)}
     Theme::update(cx, |theme| {
@@ -615,6 +877,55 @@ fn apply_appearance(appearance: Appearance, window: &mut Window, cx: &mut App) {
 }
 fn preferences_path() -> Option<PathBuf> {
     std::env::var_os("GPUI_EXPLORER_PREFERENCES").map(PathBuf::from).or_else(||Preferences::path_for("rsx-file-explorer"))
+}
+type BrowserAction = Box<dyn Fn(&mut Browser, &mut Window, &mut Context<Browser>) + 'static>;
+fn call_browser<C: AppContext>(owner: &Entity<Browser>, window: &mut Window, cx: &mut C, handler: impl FnOnce(&mut Browser, &mut Window, &mut Context<Browser>)) {
+    let owner = owner.clone();
+    let _ = window.window_handle().update(cx, |_, window, cx| {
+        owner.update(cx, |this, cx| handler(this, window, cx));
+    });
+}
+fn fill_file_menu(menu: gpui_kit::component::menu::PopupMenu, owner: Entity<Browser>, entry: Entry, window: &mut Window, cx: &mut Context<gpui_kit::component::menu::PopupMenu>) -> gpui_kit::component::menu::PopupMenu {
+    call_browser(&owner, window, cx, {
+        let entry = entry.clone();
+        move |this, window, cx| this.select(entry, window, cx)
+    });
+    let item = |label: &str, handler: BrowserAction| {
+        let owner = owner.clone();
+        PopupMenuItem::new(label.to_owned()).on_click(move |_, window, cx| {
+            call_browser(&owner, window, cx, |this, window, cx| handler(this, window, cx));
+        })
+    };
+    let open = entry.clone();
+    let tab = entry.clone();
+    let rename = entry.clone();
+    let duplicate = entry.clone();
+    let copy = entry.clone();
+    let reveal = entry.clone();
+    let info = entry.clone();
+    let analyze = entry.clone();
+    let trash = entry.clone();
+    let delete = entry.clone();
+    menu.item(item("Open", Box::new(move |this, window, cx| { this.select(open.clone(), window, cx); this.open_selection(window, cx); })))
+        .item(item("Open in New Tab", Box::new(move |this, window, cx| {
+            if tab.is_dir { this.add_tab(tab.path.clone(), window, cx); }
+            else { this.add_tab(tab.path.parent().unwrap_or(Path::new("/")).to_owned(), window, cx); }
+        })))
+        .separator()
+        .item(item("Get Info", Box::new(move |this, window, cx| this.show_info(Some(info.clone()), window, cx))))
+        .item(item("Rename", Box::new(move |this, window, cx| this.begin_rename(Some(rename.clone()), window, cx))))
+        .item(item("Duplicate", Box::new(move |this, window, cx| this.duplicate_selected(duplicate.clone(), window, cx))))
+        .item(item("New Folder", Box::new(|this, window, cx| this.new_folder(window, cx))))
+        .separator()
+        .item(item("Copy Path", Box::new(move |this, _, cx| this.copy_path(&copy.path, cx))))
+        .item(PopupMenuItem::new("Show in Finder").on_click({ let reveal = reveal.clone(); move |_,_,cx| cx.reveal_path(&reveal.path) }))
+        .item(item("Analyze this Folder", Box::new(move |this, _, cx| {
+            let path = if analyze.is_dir { analyze.path.clone() } else { analyze.path.parent().unwrap_or(Path::new("/")).to_owned() };
+            this.enqueue_scan(path, cx);
+        })))
+        .separator()
+        .item(item("Move to Trash", Box::new(move |this, window, cx| this.trash_entry(trash.clone(), window, cx))))
+        .item(item("Delete Immediately...", Box::new(move |this, _, cx| { this.confirm_delete = Some(delete.clone()); cx.notify(); })))
 }
 fn expand_home(value: &str) -> PathBuf {
     if value=="~" || value.starts_with("~/") {
@@ -635,7 +946,7 @@ fn storage_tree(node: &Node, id: String, hidden: bool, allocated: bool, expanded
 
 #[cfg(test)]
 mod tests {
-    use super::{Node, HashMap, HashSet, storage_tree, collect_expanded, has_hidden_component};
+    use super::{Node, HashMap, HashSet, storage_tree, collect_expanded, has_hidden_component, node_at};
     use std::path::Path;
     #[test]
     fn storage_tree_hides_dot_subtrees_and_preserves_stable_expansion_ids() {
@@ -656,5 +967,15 @@ mod tests {
         assert!(!nodes.values().any(|node|node.name().starts_with('.')));
         assert!(has_hidden_component(Path::new("/scan/.cache/file"),Path::new("/scan")));
         assert!(!has_hidden_component(Path::new("/scan/folder/file"),Path::new("/scan")));
+    }
+
+    #[test]
+    fn node_at_finds_nested_indexed_folder() {
+        let leaf = Node {path:"/scan/folder/a".into(),directory:false,logical:90,allocated:20,files:1,children:vec![]};
+        let root=Node {path:"/scan".into(),directory:true,logical:90,allocated:20,files:1,children:vec![
+            Node {path:"/scan/folder".into(),directory:true,logical:90,allocated:20,files:1,children:vec![leaf]},
+        ]};
+        assert_eq!(node_at(&root, Path::new("/scan/folder")).unwrap().name(), "folder");
+        assert!(node_at(&root, Path::new("/missing")).is_none());
     }
 }

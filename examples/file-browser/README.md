@@ -11,30 +11,34 @@ cargo run --manifest-path examples/file-browser/Cargo.toml --target-dir target
 cargo run --manifest-path examples/file-browser/Cargo.toml --target-dir target -- /path/to/folder
 ```
 
-Click once to select; double-click a folder to open it, or a file to open its default application. Disclosure arrows load and expand folders in the list without entering them. Click a column heading to sort. The inspector is hidden initially; its toolbar button shows Info and Preview. Text previews stop at 32 KiB, binary files show a short hex view, and images use GPUI's image element. Directory reads, lazy expansion, and previews run in the background.
+Click once to select; double-click a folder to open it, or a file to open its default application. The toolbar path field shows the complete folder path; press Enter to open that folder if it exists. Disclosure arrows load and expand folders in the list without entering them. Click a column heading to sort. Right-click a row for Open, Open in New Tab, Get Info, Rename, Duplicate, New Folder, Copy Path, Show in Finder, Analyze this Folder, Move to Trash, and Delete Immediately. The inspector is hidden initially; its toolbar button or Get Info shows Info and Preview. Text previews stop at 32 KiB, binary files show a short hex view, and images use GPUI's image element. Directory reads, lazy expansion, and previews run in the background.
 
-**Find files** opens fuzzy search. Choose **This folder** or **Include subfolders** (the default). Matches are ranked by filename and relative path, with contiguous name matches preferred. Results arrive while the search is still running; the status bar reports checked items, folders, matches, and skipped entries. Search debounces typing, cancels superseded work, and retains the best 500 results. **Stop** keeps partial results; **Clear** clears the query, and Escape returns to browsing. Dot files and dot folders are hidden by default; recursive search skips hidden subtrees until you show them. Search never recurses through symbolic links.
+**Find files** searches the current folder and every nested subfolder. There is no separate scope toggle. Matches are ranked by filename and relative path, with items in the current folder preferred over deeper matches. Results stream into the active tab while the search is still running; the status bar reports checked items, folders, matches, and skipped entries. If that folder (or a parent) was already analyzed, search uses the indexed tree instead of walking the disk again. Search debounces typing, cancels superseded work, and retains the best 500 results. Escape returns to browsing. Dot files and dot folders are hidden by default; search skips hidden subtrees until you show them. Live search never recurses through symbolic links.
 
-**Analyze space** starts a separate, cancellable background scan of the current folder. Keep browsing, searching, opening tabs, or inspecting files while it runs. Progress shows discovered files and bytes; completion fills folder sizes in the ordinary file list and provides **Storage tree**, **Largest files**, and **Scan report** tabs. The scan remains attached to its original folder when you navigate elsewhere. **Clear** cancels and discards the analysis, and old results cannot restore it. Analysis includes hidden files in its totals even when their rows are hidden. Unix scans stay on the starting filesystem and count hard links once; links and special files are skipped. Permission errors produce partial results. Allocated size uses disk blocks on Unix and file length elsewhere. Folder totals describe regular files, excluding directory metadata and filesystem overhead.
+**Analyze space** queues a cancellable background scan of the current folder. You can enqueue another folder while one scan is running; the banner shows progress and how many jobs are waiting. Keep browsing, searching, opening tabs, or inspecting files while scans run. Completion fills folder sizes in the ordinary file list and provides **Storage tree**, **Largest files**, and **Scan report** tabs for the analyzed tree. **Clear** cancels the queue and discards results. Analysis includes hidden files in its totals even when their rows are hidden. Unix scans stay on the starting filesystem and count hard links once; links and special files are skipped. Permission errors produce partial results. Allocated size uses disk blocks on Unix and file length elsewhere. Folder totals describe regular files, excluding directory metadata and filesystem overhead.
 
 Finder-compatible shortcuts:
 
 | Shortcut | Action |
 | --- | --- |
-| ⌘F | Find files |
+| ⌘F / Ctrl+F | Find files |
 | ⌘⇧. | Show/hide dot files and folders |
-| ⌘⇧G | Go to Folder; supports `~` and relative paths |
+| ⌘⇧G | Focus the path field; supports `~` and relative paths, Enter opens the folder |
 | ⌘[ / ⌘] | Back / Forward |
 | ⌘↑ | Open parent folder |
 | ⌘↓ | Open selected file or folder |
 | ↑ / ↓ | Select previous / next visible item |
 | → / ← | Expand / collapse selected folder |
 | Space | Toggle Quick Look preview |
-| ⌘T / ⌘W | New tab / close tab (last tab closes the window) |
+| F2 | Rename the selected file or folder |
+| ⌘I | Get Info |
+| ⌘⌫ | Move the selection to the Trash |
+| ⌘⇧N | New folder |
+| ⌘T / Ctrl+T / ⌘W | New tab / close tab (last tab closes the window). Drag tabs to reorder. |
 | ⌘, | Settings |
-| Escape | Close search, Go to Folder, inspector, or Settings |
+| Escape | Close search, rename, delete confirmation, inspector, or Settings |
 
-Shortcuts apply within this explorer. No files are renamed or deleted. The key positions follow [Apple's Finder shortcuts](https://support.apple.com/en-us/102650); shifted punctuation is normalized for GPUI's macOS event handling.
+Shortcuts apply within this explorer. Rename, duplicate, new folder, Trash, and permanent delete change files on disk. The key positions follow [Apple's Finder shortcuts](https://support.apple.com/en-us/102650); shifted punctuation is normalized for GPUI's macOS event handling.
 
 Preferences save in `~/Library/Application Support/rsx-file-explorer/preferences` on macOS, `%APPDATA%/rsx-file-explorer/preferences` on Windows, or `$XDG_CONFIG_HOME/rsx-file-explorer/preferences` (default `~/.config`) on Linux. `GPUI_EXPLORER_PREFERENCES` can supply a separate file for isolated previews. Hidden-file visibility resets to off at launch. Failed preference writes leave the selected appearance active for the session and show an error in Settings.
 

@@ -1,5 +1,6 @@
-use crate::{Entry, allocated_bytes};
+use crate::{Entry, Node, allocated_bytes};
 use std::{
+    collections::VecDeque,
     fs,
     path::Path,
     sync::{
@@ -64,7 +65,7 @@ pub fn search(
     cancelled: Arc<AtomicBool>,
     mut report: impl FnMut(SearchUpdate),
 ) -> Result<SearchUpdate, String> {
-    let mut pending = vec![(root.to_owned(), 0usize)];
+    let mut pending = VecDeque::from([(root.to_owned(), 0usize)]);
     let mut update = SearchUpdate::default();
     let mut ranked: Vec<(i64, Entry)> = vec![];
     let mut last_report = Instant::now();
@@ -76,7 +77,7 @@ pub fn search(
             ..update.clone()
         }
     }
-    while let Some((folder, depth)) = pending.pop() {
+    while let Some((folder, depth)) = pending.pop_front() {
         if cancelled.load(Ordering::Relaxed) {
             return Err("Search cancelled".into());
         }
@@ -121,15 +122,15 @@ pub fn search(
             let is_dir = metadata.is_dir();
             if recursive && is_dir {
                 if depth < 256 {
-                    pending.push((path.clone(), depth + 1));
+                    pending.push_back((path.clone(), depth + 1));
                 } else {
                     update.skipped += 1;
                 }
             }
             let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
             let score = fuzzy_score(query, &name)
-                .map(|score| score + 80)
-                .or_else(|| fuzzy_score(query, &relative));
+                .map(|score| score + 80 - depth as i64 * 8)
+                .or_else(|| fuzzy_score(query, &relative).map(|score| score - depth as i64 * 8));
             if let Some(score) = score {
                 update.matches += 1;
                 ranked.push((
@@ -142,6 +143,80 @@ pub fn search(
                         bytes: metadata.len(),
                         allocated: allocated_bytes(&metadata),
                         modified: metadata.modified().ok(),
+                    },
+                ));
+                if ranked.len() >= 1000 {
+                    let _ = snapshot(&update, &mut ranked);
+                }
+            }
+            if last_report.elapsed() >= Duration::from_millis(100) {
+                report(snapshot(&update, &mut ranked));
+                last_report = Instant::now();
+            }
+        }
+    }
+    let result = snapshot(&update, &mut ranked);
+    report(result.clone());
+    Ok(result)
+}
+
+/// Rank matches from an already-indexed folder tree, including this folder and every nested child.
+pub fn search_tree(
+    root: &Node,
+    query: &str,
+    hidden: bool,
+    cancelled: Arc<AtomicBool>,
+    mut report: impl FnMut(SearchUpdate),
+) -> Result<SearchUpdate, String> {
+    let mut pending = VecDeque::from([(root, 0usize)]);
+    let mut update = SearchUpdate::default();
+    let mut ranked: Vec<(i64, Entry)> = vec![];
+    let mut last_report = Instant::now();
+    fn snapshot(update: &SearchUpdate, ranked: &mut Vec<(i64, Entry)>) -> SearchUpdate {
+        ranked.sort_by(|(a, left), (b, right)| b.cmp(a).then_with(|| left.path.cmp(&right.path)));
+        ranked.truncate(500);
+        SearchUpdate {
+            results: ranked.iter().map(|(_, entry)| entry.clone()).collect(),
+            ..update.clone()
+        }
+    }
+    while let Some((node, depth)) = pending.pop_front() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Search cancelled".into());
+        }
+        update.folders += 1;
+        for child in &node.children {
+            if cancelled.load(Ordering::Relaxed) {
+                return Err("Search cancelled".into());
+            }
+            let name = child.name();
+            if !hidden && name.starts_with('.') {
+                continue;
+            }
+            update.visited += 1;
+            if child.directory {
+                pending.push_back((child, depth + 1));
+            }
+            let relative = child
+                .path
+                .strip_prefix(&root.path)
+                .unwrap_or(&child.path)
+                .to_string_lossy();
+            let score = fuzzy_score(query, &name)
+                .map(|score| score + 80 - depth as i64 * 8)
+                .or_else(|| fuzzy_score(query, &relative).map(|score| score - depth as i64 * 8));
+            if let Some(score) = score {
+                update.matches += 1;
+                ranked.push((
+                    score,
+                    Entry {
+                        path: child.path.clone(),
+                        name,
+                        is_dir: child.directory,
+                        is_symlink: false,
+                        bytes: child.logical,
+                        allocated: child.allocated,
+                        modified: None,
                     },
                 ));
                 if ranked.len() >= 1000 {
@@ -223,5 +298,45 @@ mod tests {
         assert_eq!(bounded.matches, 550);
         assert_eq!(bounded.results.len(), 500);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn indexed_tree_search_includes_nested_children() {
+        let leaf = |path: &str, logical| crate::Node {
+            path: path.into(),
+            directory: false,
+            logical,
+            allocated: logical,
+            files: 1,
+            children: vec![],
+        };
+        let root = crate::Node {
+            path: "/scan".into(),
+            directory: true,
+            logical: 30,
+            allocated: 30,
+            files: 2,
+            children: vec![
+                crate::Node {
+                    path: "/scan/nested".into(),
+                    directory: true,
+                    logical: 20,
+                    allocated: 20,
+                    files: 1,
+                    children: vec![leaf("/scan/nested/README.md", 20)],
+                },
+                leaf("/scan/README.md", 10),
+            ],
+        };
+        let found = search_tree(
+            &root,
+            "rdm",
+            false,
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(found.matches, 2);
+        assert!(found.results.iter().any(|entry| entry.path.ends_with("nested/README.md")));
     }
 }

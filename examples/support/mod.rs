@@ -52,24 +52,25 @@ pub fn launch_with_lifecycle<V: Render>(
         gpui_kit::application().with_assets(gpui_kit::assets::Assets),
         move |cx, lifecycle| {
             gpui_kit::init(cx);
-            lifecycle.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                        None,
-                        size(px(1220.), px(820.)),
-                        cx,
-                    ))),
-                    window_min_size: Some(size(px(820.), px(560.))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(title.into()),
+            lifecycle
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                            None,
+                            size(px(1220.), px(820.)),
+                            cx,
+                        ))),
+                        window_min_size: Some(size(px(820.), px(560.))),
+                        titlebar: Some(TitlebarOptions {
+                            title: Some(title.into()),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                cx,
-                build,
-            )
-            .expect("open example window");
+                    },
+                    cx,
+                    build,
+                )
+                .expect("open example window");
         },
     );
 }

@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -9,7 +10,7 @@ mod search;
 pub use rsx_disk_explorer::{
     Appearance, Node, Preferences, Scan, ScanProgress, largest_files, scan_with_progress,
 };
-pub use search::{SearchUpdate, fuzzy_score, search};
+pub use search::{SearchUpdate, fuzzy_score, search, search_tree};
 
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -59,6 +60,175 @@ pub fn read_directory(path: &Path) -> Result<(Vec<Entry>, usize), String> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok((entries, unreadable))
+}
+
+pub fn unique_path(directory: &Path, name: &OsStr) -> PathBuf {
+    let mut candidate = directory.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = Path::new(name)
+        .file_stem()
+        .unwrap_or(name)
+        .to_string_lossy();
+    let extension = Path::new(name)
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    for index in 2..10_000 {
+        candidate = directory.join(format!("{stem} {index}{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(format!("{stem} copy{extension}"))
+}
+
+fn validate_name(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Enter a name.".into());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err("A name cannot contain a path separator.".into());
+    }
+    if name == "." || name == ".." {
+        return Err("That name is reserved.".into());
+    }
+    Ok(())
+}
+
+pub fn rename_entry(path: &Path, new_name: &str) -> Result<PathBuf, String> {
+    validate_name(new_name)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Cannot rename {}", path.display()))?;
+    let destination = parent.join(new_name.trim());
+    if destination != path && destination.exists() {
+        return Err(format!(
+            "{} already exists.",
+            destination
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ));
+    }
+    fs::rename(path, &destination).map_err(|error| format!("{error}"))?;
+    Ok(destination)
+}
+
+pub fn create_folder(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    validate_name(name)?;
+    let destination = unique_path(parent, OsStr::new(name.trim()));
+    fs::create_dir(&destination).map_err(|error| format!("{error}"))?;
+    Ok(destination)
+}
+
+pub fn duplicate_entry(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Cannot duplicate {}", path.display()))?;
+    let name = path.file_name().unwrap_or_else(|| OsStr::new("copy"));
+    let stem = Path::new(name)
+        .file_stem()
+        .unwrap_or(name)
+        .to_string_lossy();
+    let extension = Path::new(name)
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    let destination = unique_path(parent, OsStr::new(&format!("{stem} copy{extension}")));
+    copy_item(path, &destination)?;
+    Ok(destination)
+}
+
+fn copy_item(from: &Path, to: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(from).map_err(|error| format!("{error}"))?;
+    if metadata.is_dir() {
+        fs::create_dir(to).map_err(|error| format!("{error}"))?;
+        for entry in fs::read_dir(from).map_err(|error| format!("{error}"))? {
+            let entry = entry.map_err(|error| format!("{error}"))?;
+            copy_item(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|error| format!("{error}"))
+    }
+}
+
+pub fn delete_permanently(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("{error}"))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path).map_err(|error| format!("{error}"))
+    } else {
+        fs::remove_file(path).map_err(|error| format!("{error}"))
+    }
+}
+
+pub fn move_to_trash(path: &Path) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("Cannot move {} to the Trash", path.display()))?;
+    if let Some(trash) = trash_directory() {
+        if fs::create_dir_all(&trash).is_ok() {
+            let destination = unique_path(&trash, name);
+            if fs::rename(path, &destination).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+        let status = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!("tell application \"Finder\" to delete POSIX file \"{escaped}\""),
+            ])
+            .status()
+            .map_err(|error| format!("{error}"))?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if std::process::Command::new("gio")
+            .args(["trash", "--", &path.to_string_lossy()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+    }
+    Err(format!("Could not move {} to the Trash.", path.display()))
+}
+
+fn trash_directory() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        #[cfg(target_os = "macos")]
+        {
+            return Some(PathBuf::from(home).join(".Trash"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Some(PathBuf::from(home).join(".local/share/Trash/files"));
+        }
+    }
+    None
+}
+
+pub fn node_at<'a>(node: &'a Node, path: &Path) -> Option<&'a Node> {
+    if node.path == path {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find(|child| path.starts_with(&child.path))
+        .and_then(|child| node_at(child, path))
 }
 
 pub fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
@@ -228,6 +398,27 @@ mod tests {
         assert!(
             matches!(preview(&root.join("binary")).unwrap(), Preview::Binary(text) if text == "00 ff 10")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rename_duplicate_and_delete_round_trip() {
+        let root = std::env::temp_dir().join(format!("rsx-ops-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("notes.txt");
+        fs::write(&file, "hello").unwrap();
+        let renamed = rename_entry(&file, "memo.txt").unwrap();
+        assert_eq!(renamed.file_name().unwrap(), "memo.txt");
+        let copy = duplicate_entry(&renamed).unwrap();
+        assert!(copy.file_name().unwrap().to_string_lossy().contains("copy"));
+        let folder = create_folder(&root, "Album").unwrap();
+        assert!(folder.is_dir());
+        move_to_trash(&copy).unwrap();
+        assert!(!copy.exists());
+        delete_permanently(&renamed).unwrap();
+        assert!(!renamed.exists());
+        assert!(rename_entry(&folder, "bad/name").is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
