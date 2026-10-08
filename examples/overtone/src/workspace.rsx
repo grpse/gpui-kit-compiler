@@ -3,25 +3,27 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::{TitleBar, WindowBorder};
 use gpui_kit::component::scroll::ScrollbarAxis;
 use gpui_kit::component::{button::{Button,ButtonVariants as _},menu::DropdownMenu,Sizable as _};
-use crate::{model::*,studio::{Studio,Action,ResizeTarget,SaveProject,SaveProjectAs,OpenProject,NewProject,ZoomIn,ZoomOut,ResetZoom,OpenSettings,UndoProject,RedoProject,ChangeTheme,CloseSession,ShowAbout,RenameProject,SelectWorkspace},primitives::*,panels};
+use crate::{model::*,studio::{Studio,Action,ResizeTarget,SaveProject,SaveProjectAs,OpenProject,NewProject,ZoomIn,ZoomOut,ResetZoom,OpenSettings,UndoProject,RedoProject,ChangeTheme,CloseSession,ShowAbout,RenameProject,SelectWorkspace,PreviewSound,PlayTimeline,PauseTimeline,StopAudio,ExportAudio,RecordSound,FinishRecording,AnalyzeRecording},primitives::*,panels};
 
 pub fn application_menus()->Vec<Menu>{menus_for_project(&Project::default())}
 pub fn menus_for_project(project:&Project)->Vec<Menu>{let mut menus=vec![
     Menu::new("File").items([MenuItem::action("New session",NewProject),MenuItem::action("Open project…",OpenProject),MenuItem::separator(),MenuItem::action("Save project",SaveProject),MenuItem::action("Save project as…",SaveProjectAs),MenuItem::separator(),MenuItem::action("Close session",CloseSession),MenuItem::action("Rename project…",RenameProject)]),
     Menu::new("Edit").items([MenuItem::action("Undo",UndoProject),MenuItem::action("Redo",RedoProject)]),
     Menu::new("View").items([MenuItem::action("Workspace settings…",OpenSettings),MenuItem::separator(),MenuItem::action("Zoom in",ZoomIn),MenuItem::action("Zoom out",ZoomOut),MenuItem::action("Reset zoom",ResetZoom),MenuItem::separator(),MenuItem::action("Switch light/dark theme",ChangeTheme)]),
+    Menu::new("Audio").items([MenuItem::action("Record microphone",RecordSound),MenuItem::action("Stop recording & split",FinishRecording),MenuItem::action("Split attached recording",AnalyzeRecording),MenuItem::separator(),MenuItem::action("Preview draft",PreviewSound),MenuItem::action("Play timeline",PlayTimeline),MenuItem::action("Stop audio",StopAudio),MenuItem::separator(),MenuItem::action("Export timeline WAV…",ExportAudio),MenuItem::action("Pause / resume timeline",PauseTimeline)]),
     Menu::new("Help").items([MenuItem::action("About Overtone",ShowAbout)])
 ];menus[2].items.push(MenuItem::separator());for profile in &project.profiles{menus[2].items.push(MenuItem::action(profile.name.clone(),SelectWorkspace{id:profile.id}));}menus}
 #[gpui]
 fn toolbar(studio:&Studio)->AnyElement{
     let profiles=studio.project.profiles.iter().map(|p|(p.id,p.name.clone())).collect::<Vec<_>>();let active=studio.project.active_profile;
-    let focus=studio.focus.clone();let file_focus=focus.clone();let edit_focus=focus.clone();let view_focus=focus.clone();let busy=studio.busy;let undo=studio.undo_stack.is_empty() || busy;let redo=studio.redo_stack.is_empty() || busy;
+    let focus=studio.focus.clone();let file_focus=focus.clone();let edit_focus=focus.clone();let view_focus=focus.clone();let audio_focus=focus.clone();let busy=studio.busy;let recording=studio.recording_active();let record_starting=studio.capture_starting;let attached=studio.project.draft.source.is_some();let undo=studio.undo_stack.is_empty() || busy;let redo=studio.redo_stack.is_empty() || busy;
     <div flex items-center h-full gap={u(2.)} w-full>
         {Button::new("file-menu").ghost().small().label("File").dropdown_menu(move|menu,_,_|menu.action_context(file_focus.clone()).menu_with_disabled("New session",Box::new(NewProject),busy).menu_with_disabled("Open project…",Box::new(OpenProject),busy).separator().menu_with_disabled("Save project",Box::new(SaveProject),busy).menu_with_disabled("Save project as…",Box::new(SaveProjectAs),busy).separator().menu("Close session",Box::new(CloseSession)).menu_with_disabled("Rename project…",Box::new(RenameProject),busy))}
         {Button::new("edit-menu").ghost().small().label("Edit").dropdown_menu(move|menu,_,_|menu.action_context(edit_focus.clone()).menu_with_disabled("Undo",Box::new(UndoProject),undo).menu_with_disabled("Redo",Box::new(RedoProject),redo))}
         {Button::new("view-menu").ghost().small().label("View").dropdown_menu(move|menu,_,_|{let menu=menu.action_context(view_focus.clone()).menu("Workspace settings…",Box::new(OpenSettings)).separator().menu("Zoom in",Box::new(ZoomIn)).menu("Zoom out",Box::new(ZoomOut)).menu("Reset zoom",Box::new(ResetZoom)).separator().menu("Switch light/dark theme",Box::new(ChangeTheme));let mut menu=menu.separator();for (id,name) in &profiles{menu=menu.menu_with_check(name.clone(),*id==active,Box::new(SelectWorkspace{id:*id}));}menu})}
+        {Button::new("audio-menu").ghost().small().label("Audio").dropdown_menu(move|menu,_,_|menu.action_context(audio_focus.clone()).menu_with_disabled("Record microphone",Box::new(RecordSound),busy || recording || !cfg!(feature="audio-output")).menu_with_disabled("Stop recording & split",Box::new(FinishRecording),!recording || record_starting).menu_with_disabled("Split attached recording",Box::new(AnalyzeRecording),busy || recording || !attached).separator().menu_with_disabled("Preview draft",Box::new(PreviewSound),busy || recording || !cfg!(feature="audio-output")).menu_with_disabled("Play timeline",Box::new(PlayTimeline),busy || recording || !cfg!(feature="audio-output")).menu("Stop audio",Box::new(StopAudio)).separator().menu_with_disabled("Export timeline WAV…",Box::new(ExportAudio),busy).menu("Pause / resume timeline",Box::new(PauseTimeline)))}
         {Button::new("help-menu").ghost().small().label("Help").dropdown_menu(move|menu,_,_|menu.action_context(focus.clone()).menu("About Overtone",Box::new(ShowAbout)))}
-        <div flex-1/><div text-size={u(11.)} pr={u(10.)}>{format!("{}{} · {}",studio.project.title,if studio.dirty(){" *"}else{""},studio.project.profile().name)}</div>
+        <div flex-1/><div text-size={u(11.)} pr={u(10.)}>{format!("{}{} · {}{}",studio.project.title,if studio.dirty(){" *"}else{""},studio.project.profile().name,if recording{format!(" · ● REC {:.1}s",studio.capture_seconds)}else{String::new()})}</div>
     </div>.into_any_element()
 }
 
@@ -44,7 +46,7 @@ fn divider(id:String,target:ResizeTarget,vertical:bool,thickness:f32,studio:&Stu
         <div when:args={(vertical,|d|d.w(u(28.)).h(u(2.)))} when:args={(!vertical,|d|d.w(u(2.)).h(u(28.)))} bg={rgb(p.border)}/>
     </div>.into_any_element()
 }
-fn minimum(module:Module)->f32{match module{Module::Harmonics=>300.,Module::Controls=>260.,Module::Timeline=>360.,Module::Keyboard=>300.,_=>180.}}
+fn minimum(module:Module)->f32{match module{Module::Reconstruction=>560.,Module::Harmonics=>300.,Module::Controls=>260.,Module::Timeline=>360.,Module::Keyboard=>300.,_=>180.}}
 #[gpui]
 fn panel(placement:&Placement,studio:&Studio,cx:&mut Context<Studio>)->AnyElement{
     let p=palette(studio.project.dark);let module=placement.module;let dock=placement.dock;
@@ -135,7 +137,7 @@ pub fn configuration_view(studio:&mut Studio,cx:&mut Context<Studio>)->AnyElemen
 }
 #[gpui]
 pub fn studio_view(studio:&mut Studio,window:&mut Window,cx:&mut Context<Studio>)->AnyElement{
-    studio.prepare_scrolls();let p=palette(studio.project.dark);let profile=studio.project.profile();window.set_rem_size(px(16.*profile.zoom));window.set_window_title(&format!("{}{} · Overtone",studio.project.title,if studio.dirty(){" *"}else{""}));cx.set_menus(menus_for_project(&studio.project));
+    studio.prepare_scrolls();studio.prepare_sound_waveforms(window,cx);studio.prepare_reconstruction(window,cx);let p=palette(studio.project.dark);let profile=studio.project.profile();window.set_rem_size(px(16.*profile.zoom));window.set_window_title(&format!("{}{} · Overtone",studio.project.title,if studio.dirty(){" *"}else{""}));cx.set_menus(menus_for_project(&studio.project));
     let moving=studio.drag_module.is_some();let layout=studio.displayed_profile();let has_left=moving || layout.panels.iter().any(|p|p.visible && p.dock==Dock::Left);let has_right=moving || layout.panels.iter().any(|p|p.visible && p.dock==Dock::Right);
     let has_lower=moving || layout.panels.iter().any(|p|p.visible && p.dock==Dock::Lower);
     let lower_height=(profile.lower_height*profile.zoom).min((f32::from(window.bounds().size.height)-250.*profile.zoom).max(100.))/profile.zoom;
@@ -164,6 +166,15 @@ pub fn studio_view(studio:&mut Studio,window:&mut Window,cx:&mut Context<Studio>
         on-action={cx.listener(|this,_:&RedoProject,window,cx|this.history(true,window,cx))}
         on-action={cx.listener(|this,_:&ChangeTheme,window,cx|this.dispatch(Action::ToggleTheme,window,cx))}
         on-action={cx.listener(|this,_:&CloseSession,window,cx|this.request_replace(crate::studio::Pending::Close,window,cx))}
+        on-action={cx.listener(|this,_:&PreviewSound,window,cx|this.start_audio(false,window,cx))}
+        on-action={cx.listener(|this,_:&PlayTimeline,window,cx|this.start_audio(true,window,cx))}
+        on-action={cx.listener(|this,_:&PauseTimeline,_,cx|this.pause_timeline(cx))}
+        on-action={cx.listener(|this,action:&crate::studio::LibraryMenu,window,cx|{let command=match action.operation{0=>Action::LoadSound(action.id),1=>{if this.project.editing_sound!=Some(action.id){return;}Action::SaveSound},2=>{if this.project.editing_sound!=Some(action.id){return;}Action::SaveCopy},_=>Action::RemoveSound(action.id)};this.dispatch(command,window,cx);})}
+        on-action={cx.listener(|this,_:&StopAudio,_,cx|{this.stop_audio();cx.notify();})}
+        on-action={cx.listener(|this,_:&ExportAudio,window,cx|this.export_audio(window,cx))}
+        on-action={cx.listener(|this,_:&RecordSound,window,cx|this.start_recording(window,cx))}
+        on-action={cx.listener(|this,_:&FinishRecording,window,cx|this.finish_recording(false,window,cx))}
+        on-action={cx.listener(|this,_:&AnalyzeRecording,window,cx|{if let Some(id)=this.project.draft.source{this.analyze_voice(id,window,cx);}})}
         on-action={cx.listener(|this,action:&SelectWorkspace,window,cx|this.dispatch(Action::Profile(action.id),window,cx))}
         on-action={cx.listener(|this,_:&RenameProject,_,cx|{this.renaming=true;cx.notify();})}
         on-action={cx.listener(|this,_:&ShowAbout,_,cx|{this.show_status=true;cx.notify();})}>

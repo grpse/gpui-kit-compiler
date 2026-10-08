@@ -1,6 +1,7 @@
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 pub use rsx_overtone::{model, persistence, storage};
+mod reconstruction {include!(concat!(env!("OUT_DIR"), "/reconstruction.rs"));}
 mod studio {
     include!(concat!(env!("OUT_DIR"), "/studio.rs"));
 }

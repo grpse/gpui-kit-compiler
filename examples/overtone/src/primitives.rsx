@@ -101,11 +101,6 @@ pub fn button(id:impl Into<SharedString>,label:impl Into<SharedString>,action:Ac
         disabled={studio.busy} on-click={cx.listener(move|this,_,window,cx|this.dispatch(action.clone(),window,cx))} />
 }
 #[gpui]
-pub fn disabled(id:&'static str,label:&'static str,dark:bool)->Button {
-    let p=palette(dark);
-    <Button args={id} ghost small label={label} disabled={true} rounded={px(0.)} tooltip="Audio engine not implemented" text-color={rgb(p.muted)} />
-}
-#[gpui]
 pub fn caption(text:impl Into<SharedString>,dark:bool)->AnyElement{
     <div text-size={u(11.)} line-height={relative(1.3)} text-color={rgb(palette(dark).muted)}>{text.into()}</div>.into_any_element()
 }

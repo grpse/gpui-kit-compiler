@@ -5,7 +5,10 @@ edition = "2024"
 build = "src/build.rsx"
 
 [features]
-ui-tests = ["gpui-kit/test-support"]
+default = ["desktop", "audio-output"]
+desktop = ["dep:gpui-kit", "dep:gpui-rsc"]
+ui-tests = ["desktop", "gpui-kit/test-support"]
+audio-output = ["dep:cpal", "dep:rtrb"]
 
 [lib]
 path = "src/core.rsx"
@@ -13,13 +16,23 @@ path = "src/core.rsx"
 [[bin]]
 name = "overtone"
 path = "src/main.rsx"
+required-features = ["desktop"]
+
+[[bin]]
+name = "overtone-render"
+path = "src/render.rsx"
 
 [dependencies]
-gpui-kit = "=0.7.0"
-gpui-rsc = { path = "../..", default-features = false, features = ["runtime"] }
+gpui-kit = { version = "=0.7.0", optional = true }
+gpui-rsc = { path = "../..", default-features = false, features = ["runtime"], optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
+cpal = { version = "0.18.2", optional = true }
+rtrb = { version = "0.4.0", optional = true }
+rustfft = "6.4.1"
+hound = "3.5.1"
+symphonia = { version = "0.5.5", features = ["all"] }
 
 [build-dependencies]
 gpui-rsc = { path = "../..", default-features = false, features = ["compiler"] }

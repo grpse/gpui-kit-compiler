@@ -70,6 +70,8 @@ impl<'de> Deserialize<'de> for Partial {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Patch {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    recorded_sample: bool,
     partials: Vec<Partial>,
     noise: Noise,
     envelope: Envelope,
@@ -77,20 +79,25 @@ struct Patch {
     gain: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capture: Option<SoundCapture>,
 }
 impl Patch {
     fn from_sound(s: &Sound) -> Self {
         Self {
+            recorded_sample:s.recorded_sample,
             partials: s.harmonics.iter().cloned().map(Partial).collect(),
             noise: s.noise.clone(),
             envelope: s.envelope.clone(),
             brightness: s.brightness,
             gain: s.gain,
             source: s.source,
+            capture: s.capture.clone(),
         }
     }
     fn sound(&self, id: Id, name: String) -> Sound {
         Sound {
+            recorded_sample:self.recorded_sample,
             id,
             name,
             harmonics: self.partials.iter().map(|h| h.0.clone()).collect(),
@@ -99,6 +106,7 @@ impl Patch {
             brightness: self.brightness,
             gain: self.gain,
             source: self.source,
+            capture: self.capture.clone(),
         }
     }
 }
@@ -125,18 +133,27 @@ struct StoredClip {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WorkspaceSettings {
+    #[serde(default)]
+    pub reconstruction: ReconstructionSettings,
     pub schema_version: u32,
+    #[serde(default)]
+    pub timeline: TimelineSettings,
     pub profiles: Vec<Profile>,
     pub active_profile: Id,
     pub dark: bool,
+    #[serde(default)]
+    pub recording: AnalysisSettings,
 }
 impl WorkspaceSettings {
     pub fn from_project(p: &Project) -> Self {
         Self {
             schema_version: 1,
+            reconstruction: p.reconstruction.clone(),
+            timeline: p.timeline.clone(),
             profiles: p.profiles.clone(),
             active_profile: p.active_profile,
             dark: p.dark,
+            recording: p.recording.clone(),
         }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -156,7 +173,10 @@ impl WorkspaceSettings {
                 return Err("Duplicate profile ID".into());
             }
         }
+        probe.reconstruction = self.reconstruction.clone();
+        probe.timeline = self.timeline.clone();
         probe.profiles.clear();
+        probe.recording = self.recording.clone();
         for p in &self.profiles {
             let mut p = p.clone();
             let selected = p.id == self.active_profile;
@@ -166,6 +186,7 @@ impl WorkspaceSettings {
             }
             probe.profiles.push(p);
         }
+        probe.upgrade_workspace();
         probe.validate()
     }
     pub fn apply(&self, p: &mut Project) -> Result<(), String> {
@@ -174,20 +195,30 @@ impl WorkspaceSettings {
         let mut active = p.active_profile;
         for profile in &self.profiles {
             let mut next = profile.clone();
+            next.upgrade_reconstruction_panel();
             next.id = p.allocate();
             if profile.id == self.active_profile {
                 active = next.id;
             }
             profiles.push(next);
         }
+        p.reconstruction = self.reconstruction.clone();
+        p.timeline = self.timeline.clone();
         p.profiles = profiles;
         p.active_profile = active;
         p.dark = self.dark;
+        p.recording = self.recording.clone();
         Ok(())
     }
 }
 #[derive(Serialize, Deserialize)]
 struct Workspace {
+    #[serde(default)]
+    reconstruction: ReconstructionSettings,
+    #[serde(default)]
+    editing_sound: Option<Id>,
+    #[serde(default)]
+    timeline: TimelineSettings,
     profiles: Vec<Profile>,
     active_profile: Id,
     dark: bool,
@@ -204,6 +235,8 @@ struct Document {
     next_id: Id,
     session_bpm: f64,
     tuning: Tuning,
+    #[serde(default)]
+    recording: AnalysisSettings,
     patches: Vec<Patch>,
     draft: SoundRef,
     library: Vec<SoundRef>,
@@ -274,6 +307,7 @@ pub fn encode(project: &Project) -> Result<Vec<u8>, String> {
         next_id: project.next_id,
         session_bpm: project.session_bpm,
         tuning: project.tuning.clone(),
+        recording: project.recording.clone(),
         patches,
         draft,
         library,
@@ -281,6 +315,8 @@ pub fn encode(project: &Project) -> Result<Vec<u8>, String> {
         tracks: project.tracks.clone(),
         clips,
         workspace: Workspace {
+            reconstruction: project.reconstruction.clone(),
+            editing_sound: project.editing_sound, timeline: project.timeline.clone(),
             profiles: project.profiles.clone(),
             active_profile: project.active_profile,
             dark: project.dark,
@@ -302,6 +338,7 @@ pub fn decode(bytes: &[u8]) -> Result<Project, String> {
         let mut legacy: Project =
             serde_json::from_slice(bytes).map_err(|e| format!("Invalid legacy project: {e}"))?;
         legacy.schema_version = SCHEMA_VERSION;
+        legacy.upgrade_workspace();
         legacy.validate()?;
         return Ok(legacy);
     }
@@ -327,12 +364,14 @@ pub fn decode(bytes: &[u8]) -> Result<Project, String> {
             .map(|p| p.sound(s.id, s.name))
             .ok_or_else(|| "Missing sound patch reference".into())
     };
-    let project = Project {
+    let mut project = Project {
+        reconstruction: doc.workspace.reconstruction,
         schema_version: SCHEMA_VERSION,
         title: doc.title,
         next_id: doc.next_id,
         session_bpm: doc.session_bpm,
         tuning: doc.tuning,
+        recording: doc.recording,
         draft: expand(doc.draft)?,
         library: doc
             .library
@@ -369,6 +408,7 @@ pub fn decode(bytes: &[u8]) -> Result<Project, String> {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
+        editing_sound: doc.workspace.editing_sound, timeline: doc.workspace.timeline,
         profiles: doc.workspace.profiles,
         active_profile: doc.workspace.active_profile,
         dark: doc.workspace.dark,
@@ -376,6 +416,7 @@ pub fn decode(bytes: &[u8]) -> Result<Project, String> {
         target_track: doc.workspace.target_track,
         insert_seconds: doc.workspace.insert_seconds,
     };
+    project.upgrade_workspace();
     project.validate()?;
     Ok(project)
 }
@@ -444,10 +485,11 @@ mod tests {
                 panel.as_object_mut().unwrap().remove("zoom");
             }
         }
-        assert_eq!(
-            decode(&serde_json::to_vec(&legacy).unwrap()).unwrap(),
-            Project::default()
-        );
+        let mut expected = Project::default();
+        for profile in &mut expected.profiles {
+            for panel in &mut profile.panels { panel.height = None; }
+        }
+        assert_eq!(decode(&serde_json::to_vec(&legacy).unwrap()).unwrap(), expected);
         let mut raw: serde_json::Value =
             serde_json::from_slice(&encode(&Project::default()).unwrap()).unwrap();
         raw["draft"]["patch"] = 999.into();
@@ -462,12 +504,97 @@ mod tests {
         settings.profiles[0].left_width = 400.;
         settings.profiles[0].panel_padding = 20.;
         settings.dark = false;
+        settings.timeline.zoom = 2.;
+        settings.timeline.snap_beats = 1.;
         let decoded: WorkspaceSettings =
             serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
         decoded.apply(&mut p).unwrap();
         assert_eq!(p.clips, clips);
+        assert_eq!(p.timeline, settings.timeline);
         assert_eq!(p.profile().left_width, 400.);
         assert!(!p.dark);
         p.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod editing_timeline_tests {
+    use super::*;
+    #[test]
+    fn editing_removing_and_roundtripping_preserve_clip_snapshots() {
+        let mut p=Project::default();let id=p.save_sound();
+        p.add_library_clip(p.library[0].clone(),id);
+        let clip=p.clips[0].clone();assert!(!clip.notes.is_empty());
+        p.editing_sound=Some(id);p.draft=p.library[0].clone();
+        p.draft.name="Edited".into();p.draft.harmonics[0].amplitude=0.27;p.draft.noise.level=0.32;
+        p.timeline.zoom=4.;p.timeline.snap_beats=0.5;
+        assert_eq!(p.save_sound(),id);assert_eq!(p.library.len(),1);assert_eq!(p.library[0],p.draft);
+        assert_eq!(p.clips[0],clip);
+        let restored=decode(&encode(&p).unwrap()).unwrap();assert_eq!(restored,p);
+        p.remove_sound(id);assert!(p.library.is_empty());assert_eq!(p.editing_sound,None);
+        assert_eq!(p.clips[0].sound,clip.sound);assert_eq!(p.clips[0].original_sound,clip.original_sound);assert_eq!(p.clips[0].library_sound,None);
+        assert_eq!(decode(&encode(&p).unwrap()).unwrap(),p);
+    }
+    #[test]
+    fn grid_snaps_to_destination_tempo_and_old_documents_default_the_view() {
+        let mut p=Project::default();p.tracks[1].bpm=90.;p.tracks[1].follow_session=false;p.timeline.snap_beats=1.;
+        assert_eq!(p.snap_seconds(0.8,1),1.);assert!((p.snap_seconds(0.8,2)-2./3.).abs()<1e-10);
+        let id=p.add_clip(p.draft.clone(),None);p.place_clip(id,2,0.8);assert!((p.clips[0].start_seconds-2./3.).abs()<1e-10);
+        p.timeline.snap_beats=0.;assert_eq!(p.snap_seconds(0.817,2),0.817);
+        let mut doc:serde_json::Value=serde_json::from_slice(&encode(&p).unwrap()).unwrap();doc["workspace"].as_object_mut().unwrap().remove("timeline");doc["workspace"].as_object_mut().unwrap().remove("editing_sound");
+        let restored=decode(&serde_json::to_vec(&doc).unwrap()).unwrap();assert_eq!(restored.timeline,TimelineSettings::default());assert_eq!(restored.editing_sound,None);
+        p.timeline.zoom=f32::NAN;assert!(p.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod partial_removal_tests {
+    use super::*;
+    #[test]
+    fn deleting_a_partial_preserves_ratios_and_survives_save_and_expansion() {
+        let mut p=Project::default();
+        let h3=p.draft.harmonics[2].clone();p.draft.remove_harmonic(1);
+        assert_eq!(p.draft.harmonics[1],h3);
+        p.draft.resize_harmonics(8);assert_eq!(p.draft.harmonics[1].multiple,2);assert_eq!(p.draft.harmonics[1].amplitude,0.);
+        assert_eq!(p.draft.harmonics[2],h3);
+        p.draft.remove_harmonic(1);let id=p.save_sound();p.add_library_clip(p.library[0].clone(),id);
+        assert_eq!(decode(&encode(&p).unwrap()).unwrap(),p);
+        p.draft.resize_harmonics(32);assert_eq!(p.draft.harmonics.len(),32);p.validate().unwrap();
+        p.draft.harmonics[1].multiple=1;assert!(p.validate().is_err());
+    }
+    #[test]
+    fn library_drop_uses_destination_grid_and_independent_snapshots() {
+        let mut p=Project::default();p.tracks[1].bpm=90.;p.tracks[1].follow_session=false;let sound=p.save_sound();
+        let clip=p.place_library_sound(sound,2,0.91).unwrap();
+        assert_eq!(p.clips[0].track,2);assert_eq!(p.selected_clip,Some(clip));
+        assert!((p.clips[0].start_seconds-5./6.).abs()<1e-9);
+        let instance=p.clips[0].clone();p.editing_sound=Some(sound);p.draft.remove_harmonic(1);p.save_sound();
+        assert_eq!(p.clips[0],instance);assert!(!p.clips[0].notes.is_empty());
+        let before=p.clone();assert_eq!(p.place_library_sound(sound,999,0.),None);assert_eq!(p,before);
+    }
+}
+
+#[cfg(test)] mod reconstruction_migration_tests {
+    use super::*;
+    #[test] fn old_projects_and_settings_gain_a_hidden_component_without_losing_the_layout() {
+        let project=Project::default();let mut raw:serde_json::Value=serde_json::from_slice(&encode(&project).unwrap()).unwrap();
+        raw["workspace"].as_object_mut().unwrap().remove("reconstruction");
+        for profile in raw["workspace"]["profiles"].as_array_mut().unwrap(){profile["panels"].as_array_mut().unwrap().retain(|p|p["module"]!="Reconstruction");}
+        let restored=decode(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(restored.reconstruction,ReconstructionSettings::default());
+        for p in &restored.profiles {assert_eq!(p.panels.len(),8);assert!(!p.panels.iter().find(|p|p.module==Module::Reconstruction).unwrap().visible);}
+        let mut settings=WorkspaceSettings::from_project(&project);
+        for p in &mut settings.profiles {p.panels.retain(|p|p.module!=Module::Reconstruction);}
+        settings.validate().unwrap();let mut destination=Project::default();settings.apply(&mut destination).unwrap();destination.validate().unwrap();
+        assert!(destination.profile().panels.iter().any(|p|p.module==Module::Reconstruction && !p.visible));
+        raw["workspace"]["profiles"][0]["panels"].as_array_mut().unwrap().retain(|p|p["module"]!="Timeline");
+        assert!(decode(&serde_json::to_vec(&raw).unwrap()).is_err());
+    }
+    #[test] fn cleanup_controls_and_sparse_sound_edits_roundtrip_together() {
+        let mut p=Project::default();p.reconstruction.weak_threshold=0.12;p.reconstruction.remove_noise=true;p.reconstruction.cycles=8.;
+        p.draft.harmonics[1].amplitude=0.001;p.draft.clean_harmonics(0.12,true);
+        assert_eq!(decode(&encode(&p).unwrap()).unwrap(),p);
+        let settings=WorkspaceSettings::from_project(&p);let mut restored=Project::default();settings.apply(&mut restored).unwrap();assert_eq!(restored.reconstruction,p.reconstruction);
+        p.reconstruction.weak_threshold=f32::NAN;assert!(p.validate().is_err());
     }
 }
